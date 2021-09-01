@@ -231,6 +231,10 @@ args = {
 model, mean, std = get_model(args=args)
 
 num_ftrs = model.head.in_features
+
+for child in model.children():
+    for param in child.parameters():
+        param.requires_grad = False
 # Here the size of each output sample is set to 2.
 # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
 model.head = nn.Linear(num_ftrs, 2)
