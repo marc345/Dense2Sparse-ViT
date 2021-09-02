@@ -164,8 +164,11 @@ class Block(nn.Module):
             y, attn = self.attn(self.norm1(x))
             if return_attention:
                 return attn
-        x = x + self.drop_path(y)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+            x = x + self.drop_path(y)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+
         return x
 
 
@@ -249,8 +252,11 @@ class VisionTransformer(nn.Module):
         """
             Modified forward path to optimize the patch dropping
         """
-        B, N, D = x.shape
-        attentions = self.forward_selfattention(x)
+        B, C, H, W = x.shape
+
+        # TODO: WHEHN TO CALL DETACH() HERE?
+
+        attentions = self.forward_selfattention(x)  # shape (B, H, N, N)
         attentions = torch.mean(attentions[:, :, 0, 1:],  # attentions.shape: (B, 1, 1, N-1)
                                 dim=1)  # take average over all head instead of only head 1
 
@@ -259,7 +265,7 @@ class VisionTransformer(nn.Module):
         scale = x.shape[2] // w_featmap
 
         if self.training:
-            probabilities = torch.mean(attentions[:, :, 1, 1:], dim=1).unsqueeze(-1)
+            probabilities = attentions.unsqueeze(-1)
             probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)
 
             # binary tensor of shape (B, N-1, 1)
@@ -267,13 +273,15 @@ class VisionTransformer(nn.Module):
             keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1]
 
             # ratio of kept patches per image, shape (B, 1)
-            keep_ratio = torch.sum(keep_decision[:, :, 1], dim=-1, keepdim=True)/(N-1)
+            keep_ratio = torch.sum(keep_decision, dim=-1, keepdim=True)\
+                         /(attentions.shape[-1]-1)
+            print(f'Keep ratio: {keep_ratio}')
 
         else:
             val, idx = torch.sort(attentions)
             val /= torch.sum(val, dim=1, keepdim=True)
             cumval = torch.cumsum(val, dim=1)
-            th_attn = cumval >= 0.5
+            th_attn = cumval >= 0.8
 
             keep_decision = torch.zeros_like(th_attn).scatter_(dim=-1, index=idx, src=th_attn)
 
@@ -282,8 +290,28 @@ class VisionTransformer(nn.Module):
 
         x = x * patch_mask
 
+        # convert to list
+        if not isinstance(x, list):
+            x = [x]
+        # Perform forward pass separately on each resolution input.
+        # The inputs corresponding to a single resolution are clubbed and single
+        # forward is run on the same resolution inputs. Hence we do several
+        # forward passes = number of different resolutions used. We then
+        # concatenate all the output features.
+        idx_crops = torch.cumsum(torch.unique_consecutive(
+            torch.tensor([inp.shape[-1] for inp in x]),
+            return_counts=True,
+        )[1], 0)
+        start_idx = 0
+        for end_idx in idx_crops:
+            _out = self.forward_features(torch.cat(x[start_idx: end_idx]))
+            if start_idx == 0:
+                output = _out
+            else:
+                output = torch.cat((output, _out))
+            start_idx = end_idx
         # Run the head forward on the concatenated features.
-        return self.head(self.final_ffn_block(x))
+        return self.head(output)
 
     def forward_features(self, x):
         B = x.shape[0]
