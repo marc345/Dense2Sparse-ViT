@@ -415,10 +415,18 @@ def dino_small(patch_size=16, pretrained=False, **kwargs):
 
 
 @register_model
-def dino_base(patch_size=16, **kwargs):
+def dino_base(patch_size=16, pretrained=False, **kwargs):
     model = VisionTransformer(
         patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model_url = {
+        16: "https://dl.fbaipublicfiles.com/dino/dino_vitbase16_pretrain/dino_vitbase16_pretrain.pth",
+        8: "https://dl.fbaipublicfiles.com/dino/dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+    }
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url(model_url[patch_size])
+        model.load_state_dict(state_dict, strict=False)
+
     return model
 
 
