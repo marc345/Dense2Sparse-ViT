@@ -4,17 +4,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-import numpy as np
 from torchvision import datasets, models, transforms
-import matplotlib.pyplot as plt
 import time
 import os
 import copy
 from tqdm import tqdm
 
 import vit_models
-
-plt.ion()   # interactive mode
 
 # Data augmentation and normalization for training
 # Just normalization for validation
@@ -33,11 +29,13 @@ data_transforms = {
     ]),
 }
 
-data_dir = 'data/hymenoptera_data'
-image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
+#data_dir = 'data/hymenoptera_data'
+#image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
+data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
+image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
                                           data_transforms[x])
                   for x in ['train', 'val']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=128,
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32,
                                              shuffle=True, num_workers=3)
               for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
@@ -45,32 +43,6 @@ class_names = image_datasets['train'].classes
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-######################################################################
-# Visualize a few images
-# ^^^^^^^^^^^^^^^^^^^^^^
-# Let's visualize a few training images so as to understand the data
-# augmentations.
-
-def imshow(inp, title=None):
-    """Imshow for Tensor."""
-    inp = inp.numpy().transpose((1, 2, 0))
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    inp = std * inp + mean
-    inp = np.clip(inp, 0, 1)
-    plt.imshow(inp)
-    if title is not None:
-        plt.title(title)
-    plt.pause(0.001)  # pause a bit so that plots are updated
-
-
-# Get a batch of training data
-#inputs, classes = next(iter(dataloaders['train']))
-
-# Make a grid from batch
-#out = torchvision.utils.make_grid(inputs)
-
-#imshow(out, title=[class_names[x] for x in classes])
 
 def get_model(args, pretrained=True):
     model_names = sorted(name for name in models.__dict__
@@ -114,7 +86,6 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
 
-        # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
                 model.train()  # Set model to training mode
@@ -124,8 +95,11 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
             running_loss = 0.0
             running_corrects = 0
 
-            # Iterate over data.
             for inputs, labels in tqdm(dataloaders[phase]):
+########################################################################################################################
+            #  overfit on single batch test
+            #inputs, labels = next(iter(dataloaders[phase]))
+
                 inputs = inputs.to(device)
                 labels = labels.to(device)
 
@@ -147,6 +121,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
                 # statistics
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
+########################################################################################################################
             if phase == 'train':
                 scheduler.step()
 
@@ -174,44 +149,6 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
 
 ######################################################################
-# Visualizing the model predictions
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#
-# Generic function to display predictions for a few images
-#
-
-def visualize_model(model, num_images=6):
-    was_training = model.training
-    model.eval()
-    images_so_far = 0
-    fig = plt.figure()
-
-    with torch.no_grad():
-        for i, (inputs, labels) in enumerate(dataloaders['val']):
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-
-            for j in range(inputs.size()[0]):
-                images_so_far += 1
-                ax = plt.subplot(num_images//2, 2, images_so_far)
-                ax.axis('off')
-                ax.set_title('predicted: {}'.format(class_names[preds[j]]))
-                imshow(inputs.cpu().data[j])
-
-                if images_so_far == num_images:
-                    model.train(mode=was_training)
-                    return
-        model.train(mode=was_training)
-
-######################################################################
-# Finetuning the convnet
-# ----------------------
-#
-# Load a pretrained model and reset final fully connected layer.
-#
 
 args = {
     'model_name': 'dino_small',
@@ -223,12 +160,15 @@ model, mean, std = get_model(args=args)
 
 num_ftrs = model.head.in_features
 
-for child in model.children():
-    for param in child.parameters():
+for name, param in model.named_parameters():
+    if 'blocks.11' in name or 'blocks.12'  in name or 'head.' in name or 'norm.' in name:
+        print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
+        continue
+    else:
         param.requires_grad = False
+    print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
 # Here the size of each output sample is set to 2.
 # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
-model.head = nn.Linear(num_ftrs, 2)
 
 model = model.to(device)
 
@@ -242,21 +182,11 @@ exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
 
 ######################################################################
 # Train and evaluate
-# ^^^^^^^^^^^^^^^^^^
-#
-# It should take around 15-25 min on CPU. On GPU though, it takes less than a
-# minute.
-#
+
 
 model = train_model(model, criterion, optimizer_ft, exp_lr_scheduler,
                        num_epochs=25)
 
 ######################################################################
-#
 
-#visualize_model(model)
-
-
-#plt.show()
-#plt.ioff()
 

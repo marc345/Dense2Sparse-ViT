@@ -145,14 +145,12 @@ class Block(nn.Module):
         Output = Intermediate_Output + FFN(Intermediate_Output)
     """
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, ffn_only=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
 
-        self.ffn_only = ffn_only
-        if not self.ffn_only:
-            self.norm1 = norm_layer(dim)
-            self.attn = Attention(
-                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -160,14 +158,49 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, return_attention=False):
-        if not self.ffn_only:
-            y, attn = self.attn(self.norm1(x))
-            if return_attention:
-                return attn
-            x = x + self.drop_path(y)
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
-        else:
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        y, attn = self.attn(self.norm1(x))
+        if return_attention:
+            return attn
+        x = x + self.drop_path(y)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        return x
+
+class FinalAttentionSubBlock(nn.Module):
+    """
+        Vision Transformer Encoder Layer
+        Intermediate_Output = Input + MSA(Input)
+        Output = Intermediate_Output + FFN(Intermediate_Output)
+    """
+    def __init__(self, dim, num_heads, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0., norm_layer=nn.LayerNorm):
+        super().__init__()
+
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
+    def forward(self, x):
+        _, attn = self.attn(self.norm1(x))
+
+        return attn
+
+class FinalMlpSubBlock(nn.Module):
+    """
+        Vision Transformer Encoder Layer
+        Intermediate_Output = Input + MSA(Input)
+        Output = Intermediate_Output + FFN(Intermediate_Output)
+    """
+    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, x):
+        x = x + self.drop_path(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
 
@@ -218,19 +251,20 @@ class VisionTransformer(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
-            for i in range(depth)])
+            for i in range(depth-1)])
+
+        # split the final block, such that we can use the attention maps in the models forward pass to select patches
+        self.blocks.extend([
+            FinalAttentionSubBlock(dim=embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                                drop=drop_rate, attn_drop=attn_drop_rate, norm_layer=norm_layer)
+        ])
+
+        self.blocks.extend([
+            FinalMlpSubBlock(dim=embed_dim, mlp_ratio=mlp_ratio, drop=drop_rate,
+                             drop_path=dpr[-1], norm_layer=norm_layer)
+        ])
+
         self.norm = norm_layer(embed_dim)
-
-        self.patch_drop_predictor = nn.Sequential(
-            nn.Linear(img_size[0]//patch_size, img_size[0]//patch_size),
-            nn.GELU(),
-            nn.Linear(img_size[0]//patch_size, 2),
-            nn.LogSoftmax(dim=-1)
-        )
-
-        self.final_ffn_block = Block(
-                                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
-                                norm_layer=norm_layer, ffn_only=True)
 
         # Classifier head
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
@@ -253,42 +287,6 @@ class VisionTransformer(nn.Module):
             Modified forward path to optimize the patch dropping
         """
         B, C, H, W = x.shape
-
-        # TODO: WHEHN TO CALL DETACH() HERE?
-
-        attentions = self.forward_selfattention(x)  # shape (B, H, N, N)
-        attentions = torch.mean(attentions[:, :, 0, 1:],  # attentions.shape: (B, 1, 1, N-1)
-                                dim=1)  # take average over all head instead of only head 1
-
-        w_featmap = int(np.sqrt(attentions.shape[-1]))
-        h_featmap = int(np.sqrt(attentions.shape[-1]))
-        scale = x.shape[2] // w_featmap
-
-        if self.training:
-            probabilities = attentions.unsqueeze(-1)
-            probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)
-
-            # binary tensor of shape (B, N-1, 1)
-            # second element tells if patch is kept (arbitrary decision)
-            keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1]
-
-            # ratio of kept patches per image, shape (B, 1)
-            keep_ratio = torch.sum(keep_decision, dim=-1, keepdim=True)\
-                         /(attentions.shape[-1]-1)
-            print(f'Keep ratio: {keep_ratio}')
-
-        else:
-            val, idx = torch.sort(attentions)
-            val /= torch.sum(val, dim=1, keepdim=True)
-            cumval = torch.cumsum(val, dim=1)
-            th_attn = cumval >= 0.8
-
-            keep_decision = torch.zeros_like(th_attn).scatter_(dim=-1, index=idx, src=th_attn)
-
-        patch_mask = keep_decision.reshape(-1, w_featmap, h_featmap).float()  # shape (B, W, H)
-        patch_mask = nn.functional.interpolate(patch_mask.unsqueeze(1), scale_factor=scale, mode="nearest")  # (B,C,H,W)
-
-        x = x * patch_mask
 
         # convert to list
         if not isinstance(x, list):
@@ -330,8 +328,51 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x)
 
         #  pass through transformer's encoder layers
-        for blk in self.blocks:
-            x = blk(x)
+        for i, blk in enumerate(self.blocks):
+            if i < len(self.blocks) - 2:
+                x = blk(x)
+            elif i == len(self.blocks) - 2:
+                #  pass masked images through final MSA sublayer (final encoder layer was split in MSA and MLP part)
+                final_attn = blk(x)  # shape (B, H, N, N)
+
+                # always keep the class patch
+                cls_decision = torch.ones_like(x[:, 0:1, :])  # shape (B, 1, D)
+
+                #  take average over all head instead of only head 1
+                final_attn = torch.mean(final_attn[:, :, 0, 1:], dim=1)  # final_attn.shape: (B, 1, 1, N-1)
+
+                if self.training:
+                    probabilities = final_attn.unsqueeze(-1)
+                    probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)
+
+                    # binary tensor of shape (B, N-1, 1)
+                    # second element tells if patch is kept (arbitrary decision)
+                    keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1].unsqueeze(-1)
+
+
+                else:
+                    val, idx = torch.sort(final_attn)
+                    val /= torch.sum(val, dim=1, keepdim=True)
+                    cumval = torch.cumsum(val, dim=1)
+                    th_attn = cumval >= 0.5
+
+                    keep_decision = torch.zeros_like(th_attn).scatter_(dim=-1, index=idx, src=th_attn).unsqueeze(-1)
+
+                # ratio of kept patches per image, shape (B, 1)
+                keep_ratio = torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
+                             / (final_attn.shape[-1] - 1), dim=0)
+                print(f'Mean  {"training" if self.training else "validation"} keep ratio: {keep_ratio}')
+
+                # expand scalar decision for each patch to match embedding dimension
+                keep_decision = keep_decision.repeat(1, 1, x.shape[-1])
+                patch_mask = torch.cat((cls_decision, keep_decision), dim=-2)
+
+            elif i == len(self.blocks) - 1:
+                #  pass masked images through final MLP sublayer (final encoder layer was split in MSA and MLP part)
+                x = self.blocks[-1](x * patch_mask)
+            else:
+                pass
+
         if self.norm is not None:
             x = self.norm(x)
 

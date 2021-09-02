@@ -11,6 +11,6 @@ conda activate pytcu10
 DATA_PATH="/scratch_net/biwidl215/segerm/ImageNetVal2012/"  # seems to run faster from here??
 #DATA_PATH="/srv/beegfs-benderdata/scratch/density_estimation/data/segerm/ImageNetVal2012"
 
-python -u -m pip install -r requirements.txt
+#python -u -m pip install -r requirements.txt
 
 python -u main.py
