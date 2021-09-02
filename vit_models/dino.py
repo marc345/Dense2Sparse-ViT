@@ -6,6 +6,8 @@ https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision
 import math
 from functools import partial
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 
@@ -143,20 +145,25 @@ class Block(nn.Module):
         Output = Intermediate_Output + FFN(Intermediate_Output)
     """
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, ffn_only=False):
         super().__init__()
-        self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
+        self.ffn_only = ffn_only
+        if not self.ffn_only:
+            self.norm1 = norm_layer(dim)
+            self.attn = Attention(
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, return_attention=False):
-        y, attn = self.attn(self.norm1(x))
-        if return_attention:
-            return attn
+        if not self.ffn_only:
+            y, attn = self.attn(self.norm1(x))
+            if return_attention:
+                return attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -211,6 +218,17 @@ class VisionTransformer(nn.Module):
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
+        self.patch_drop_predictor = nn.Sequential(
+            nn.Linear(img_size[0]//patch_size, img_size[0]//patch_size),
+            nn.GELU(),
+            nn.Linear(img_size[0]//patch_size, 2),
+            nn.LogSoftmax(dim=-1)
+        )
+
+        self.final_ffn_block = Block(
+                                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                                norm_layer=norm_layer, ffn_only=True)
+
         # Classifier head
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
@@ -228,28 +246,44 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x):
-        # convert to list
-        if not isinstance(x, list):
-            x = [x]
-        # Perform forward pass separately on each resolution input.
-        # The inputs corresponding to a single resolution are clubbed and single
-        # forward is run on the same resolution inputs. Hence we do several
-        # forward passes = number of different resolutions used. We then
-        # concatenate all the output features.
-        idx_crops = torch.cumsum(torch.unique_consecutive(
-            torch.tensor([inp.shape[-1] for inp in x]),
-            return_counts=True,
-        )[1], 0)
-        start_idx = 0
-        for end_idx in idx_crops:
-            _out = self.forward_features(torch.cat(x[start_idx: end_idx]))
-            if start_idx == 0:
-                output = _out
-            else:
-                output = torch.cat((output, _out))
-            start_idx = end_idx
+        """
+            Modified forward path to optimize the patch dropping
+        """
+        B, N, D = x.shape
+        attentions = self.forward_selfattention(x)
+        attentions = torch.mean(attentions[:, :, 0, 1:],  # attentions.shape: (B, 1, 1, N-1)
+                                dim=1)  # take average over all head instead of only head 1
+
+        w_featmap = int(np.sqrt(attentions.shape[-1]))
+        h_featmap = int(np.sqrt(attentions.shape[-1]))
+        scale = x.shape[2] // w_featmap
+
+        if self.training:
+            probabilities = torch.mean(attentions[:, :, 1, 1:], dim=1).unsqueeze(-1)
+            probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)
+
+            # binary tensor of shape (B, N-1, 1)
+            # second element tells if patch is kept (arbitrary decision)
+            keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1]
+
+            # ratio of kept patches per image, shape (B, 1)
+            keep_ratio = torch.sum(keep_decision[:, :, 1], dim=-1, keepdim=True)/(N-1)
+
+        else:
+            val, idx = torch.sort(attentions)
+            val /= torch.sum(val, dim=1, keepdim=True)
+            cumval = torch.cumsum(val, dim=1)
+            th_attn = cumval >= 0.5
+
+            keep_decision = torch.zeros_like(th_attn).scatter_(dim=-1, index=idx, src=th_attn)
+
+        patch_mask = keep_decision.reshape(-1, w_featmap, h_featmap).float()  # shape (B, W, H)
+        patch_mask = nn.functional.interpolate(patch_mask.unsqueeze(1), scale_factor=scale, mode="nearest")  # (B,C,H,W)
+
+        x = x * patch_mask
+
         # Run the head forward on the concatenated features.
-        return self.head(output)
+        return self.head(self.final_ffn_block(x))
 
     def forward_features(self, x):
         B = x.shape[0]

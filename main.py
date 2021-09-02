@@ -102,15 +102,6 @@ def get_model(args, pretrained=True):
 ######################################################################
 # Training the model
 # ------------------
-#
-# Now, let's write a general function to train a model. Here, we will
-# illustrate:
-#
-# -  Scheduling the learning rate
-# -  Saving the best model
-#
-# In the following, parameter ``scheduler`` is an LR scheduler object from
-# ``torch.optim.lr_scheduler``.
 
 
 def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
