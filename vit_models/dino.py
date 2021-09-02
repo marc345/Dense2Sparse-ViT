@@ -78,6 +78,13 @@ class DropPath(nn.Module):
 
 
 class Mlp(nn.Module):
+    """
+        FFN of Vision Transformer Encoder Layer
+        1 Linear Layer followed by a GELU nonlinearity
+        +
+        1 Linear Layer followed by dropout
+        Intermediate dimension may differ if specified (usually larger than D) otherwise it's the same a D
+    """
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
@@ -97,6 +104,12 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
+    """
+        MSA Module (Self attention in parallel in H heads)
+        Input shape: (B, N, D)
+        Q, K, V shape: (B, H, N, D/H)
+        Output shape: (B, N, D)
+    """
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
@@ -111,10 +124,10 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]  # each of shape (B, H, N, D/H)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale  # shape: (B, H, N, N)
+        attn = attn.softmax(dim=-1)  # row wise softmax (summing along direction of column dimension means summing over rows)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
@@ -124,6 +137,11 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
+    """
+        Vision Transformer Encoder Layer
+        Intermediate_Output = Input + MSA(Input)
+        Output = Intermediate_Output + FFN(Intermediate_Output)
+    """
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
@@ -145,8 +163,7 @@ class Block(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
+    """ Image to Patch Embedding """
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
@@ -155,10 +172,15 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.num_patches = num_patches
 
+        # patchify image by convolution with kernel and stride of patch size
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
+        #  H = W = sqrt(num_patches)
+        #  C = embed_dim, 768 for base
         B, C, H, W = x.shape
+        #  flatten last 2 dimensions (H & W) to obtain token sequence from patches N = H/patch_size * W/patch_size
+        #  also change shape to (B, N, D)
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
@@ -233,12 +255,19 @@ class VisionTransformer(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
 
+        #  add batch dimension to CLS token without changing token and embedding dimension (-1)
+        #  this is done to create a different CLS token (parameter) for every patchified image in the batch
+        #  for the positional embedding this needs to be done because the positional embedding is the same
+        #  for each image and changes only for the patches within the image
         cls_tokens = self.cls_token.expand(B, -1, -1)
+        #  prepend cls token to token list of patchified images
         x = torch.cat((cls_tokens, x), dim=1)
         pos_embed = self.interpolate_pos_encoding(x, self.pos_embed)
+        #  add positional embedding
         x = x + pos_embed
         x = self.pos_drop(x)
 
+        #  pass through transformer's encoder layers
         for blk in self.blocks:
             x = blk(x)
         if self.norm is not None:
@@ -247,19 +276,30 @@ class VisionTransformer(nn.Module):
         return x[:, 0]
 
     def interpolate_pos_encoding(self, x, pos_embed):
+        """
+            Add positional encoding for additional tokens in the sequence in case of larger images
+            Creates positional encoding tokens for the additional patch tokens by bicubic interpolation
+            of the existing positional encoding
+        """
         npatch = x.shape[1] - 1
         N = pos_embed.shape[1] - 1
         if npatch == N:
+            #  return positional embedding if the image is of the right size for that the positional
+            #  embedding was created for (larger/smaller images yield different number of patches/sequence length)
             return pos_embed
+        #  otherwise interpolate the positional embedding to account for missing positions
         class_emb = pos_embed[:, 0]
         pos_embed = pos_embed[:, 1:]
         dim = x.shape[-1]
         pos_embed = nn.functional.interpolate(
+            #  reshape positional embedding into image shape: (B, H, W, C) and permute to (B, C, H, W) before interpolating
             pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
             scale_factor=math.sqrt(npatch / N),
             mode='bicubic',
         )
+        #  permute and reshape back into new shape (B, N_new, D)
         pos_embed = pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        #  prepend positional embedding for CLS token again to interpolated positional embedding
         return torch.cat((class_emb.unsqueeze(0), pos_embed), dim=1)
 
     def forward_selfattention(self, x):
