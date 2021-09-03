@@ -37,10 +37,17 @@ data_transforms = {
     ]),
 }
 
+mask_test_dir = 'test_imgs/input'
+mask_test_dataset = datasets.ImageFolder(mask_test_dir, data_transforms['val'])
+mask_test_dataloader = torch.utils.data.DataLoader(mask_test_dataset, batch_size=16)
+mask_test_imgs = next(iter(mask_test_dataloader))
+print(mask_test_imgs.shape)
+
 data_dir = 'data/hymenoptera_data'
-#image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
 #data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
-image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
+
+#image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
+image_datasets = {x: datasets.ImageFolder(data_dir,
                                           data_transforms[x])
                   for x in ['train', 'val']}
 dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=8,
@@ -152,10 +159,9 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
 
-                # get first 16 images in batch to visualize generated mask (batch is randomly shuffled)
-                imgs = inputs[:16]
-                B, _, H, W = imgs.shape
-                patch_mask = model.forward_features(imgs, return_patch_mask=True)  # shape: (B, N, D)
+                B, _, H, W = mask_test_imgs.shape
+
+                patch_mask = model.forward_features(mask_test_imgs, return_patch_mask=True)#.detach()  # shape: (B, N, D)
                 patch_mask = patch_mask[:, 1:, 0]  # exclude CLS token and remove embedding dimension, shape: (B, N-1)
 
                 patches_per_image_side = int(patch_mask.shape[-1] ** 0.5)
