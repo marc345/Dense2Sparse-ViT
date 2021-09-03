@@ -235,6 +235,9 @@ class VisionTransformer(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
         super().__init__()
+
+        self.keeping_ratio = 0.0
+
         self.num_features = self.embed_dim = embed_dim
         self.num_classes = num_classes
 
@@ -339,7 +342,7 @@ class VisionTransformer(nn.Module):
                 cls_decision = torch.ones_like(x[:, 0:1, :])  # shape (B, 1, D)
 
                 #  take average over all head instead of only head 1
-                final_attn = torch.mean(final_attn[:, :, 0, 1:], dim=1)  # final_attn.shape: (B, 1, N-1)
+                final_attn = torch.mean(final_attn[:, :, 0:1, 1:], dim=1)  # final_attn.shape: (B, 1, N-1)
 
                 if self.training:
                     probabilities = final_attn.permute(0, 2, 1)  # shape (B, N-1, 1)
@@ -361,7 +364,7 @@ class VisionTransformer(nn.Module):
                     keep_decision = keep_decision.permute(0, 2, 1)  # shape: (B, N-1, 1)
 
                 # ratio of kept patches per image, shape (B, 1)
-                keep_ratio = torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
+                self.keeping_ratio = torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
                              / (final_attn.shape[-1] - 1), dim=0)
                 # print(f'Mean  {"training" if self.training else "validation"} keep ratio: {keep_ratio}')
 

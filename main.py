@@ -35,7 +35,7 @@ data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
 image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
                                           data_transforms[x])
                   for x in ['train', 'val']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32,
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=256,
                                              shuffle=True, num_workers=3)
               for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
@@ -128,8 +128,8 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-            print('{} Loss: {:.4f} Acc: {:.4f}'.format(
-                phase, epoch_loss, epoch_acc))
+            print('{} Loss: {:.4f} Acc: {:.4f} Keeping ratio: {:.4f}'.format(
+                phase, epoch_loss, epoch_acc, model.keeping_ratio))
 
             # deep copy the model
             if phase == 'val' and epoch_acc > best_acc:
