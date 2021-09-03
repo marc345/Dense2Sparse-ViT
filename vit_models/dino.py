@@ -314,7 +314,18 @@ class VisionTransformer(nn.Module):
         # Run the head forward on the concatenated features.
         return self.head(output)
 
-    def forward_features(self, x):
+    def forward_features(self, x, return_patch_mask=False):
+        """
+            Turn the input into patches and pass it through all Transformer encoder layers
+            In the last layer compute the patch mask based on the attention weights of the CLS token query
+            Then pass the masked image (in patch representation, e.g. shape (B, N, D), CLS token is always kept)
+            through the MLP of the final encoder layer
+            Before returning pass it also through the LayerNorm
+            Finally return only the CLS token
+
+            input.shape: (B, N, D)
+            output.shape: (B, D)
+        """
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -372,6 +383,9 @@ class VisionTransformer(nn.Module):
                 keep_decision = keep_decision.repeat(1, 1, x.shape[-1])
                 patch_mask = torch.cat((cls_decision, keep_decision), dim=1)
 
+                if return_patch_mask:
+                    return patch_mask
+
             elif i == len(self.blocks) - 1:
                 #  pass masked images through final MLP sublayer (final encoder layer was split in MSA and MLP part)
                 x = self.blocks[-1](x * patch_mask)
@@ -379,8 +393,11 @@ class VisionTransformer(nn.Module):
                 pass
 
         if self.norm is not None:
+            # Layer norm does not change input shape
             x = self.norm(x)
 
+        # x.shape: (B, N, D)
+        # return only CLS token
         return x[:, 0]
 
     def interpolate_pos_encoding(self, x, pos_embed):
@@ -461,9 +478,6 @@ class VisionTransformer(nn.Module):
                 x = blk(x)
             else:
                 return blk(x, return_attention=True)
-
-    def get_masked_images(self, x):
-        x = self.forward_features(x)
 
     def forward_return_n_last_blocks(self, x, n=1, return_patch_avgpool=False):
         B = x.shape[0]
