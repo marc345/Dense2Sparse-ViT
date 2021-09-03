@@ -339,11 +339,11 @@ class VisionTransformer(nn.Module):
                 cls_decision = torch.ones_like(x[:, 0:1, :])  # shape (B, 1, D)
 
                 #  take average over all head instead of only head 1
-                final_attn = torch.mean(final_attn[:, :, 0, 1:], dim=1)  # final_attn.shape: (B, 1, 1, N-1)
+                final_attn = torch.mean(final_attn[:, :, 0, 1:], dim=1)  # final_attn.shape: (B, 1, N-1)
 
                 if self.training:
-                    probabilities = final_attn.unsqueeze(-1)
-                    probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)
+                    probabilities = final_attn.permute(0, 2, 1)  # shape (B, N-1, 1)
+                    probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)  # shape (B, N-1, 2)
 
                     # binary tensor of shape (B, N-1, 1)
                     # second element tells if patch is kept (arbitrary decision)
@@ -351,21 +351,23 @@ class VisionTransformer(nn.Module):
 
 
                 else:
-                    val, idx = torch.sort(final_attn)
+                    val, idx = torch.sort(final_attn)  # val.shape: (B, 1, N-1)
                     val /= torch.sum(val, dim=1, keepdim=True)
                     cumval = torch.cumsum(val, dim=1)
                     th_attn = cumval >= 0.5
 
-                    keep_decision = torch.zeros_like(th_attn).scatter_(dim=-1, index=idx, src=th_attn).unsqueeze(-1)
+                    keep_decision = torch.zeros_like(th_attn)
+                    keep_decision.scatter_(dim=-1, index=idx, src=th_attn)  # shape: (B, 1, N-1)
+                    keep_decision = keep_decision.permute(0, 2, 1)  # shape: (B, N-1, 1)
 
                 # ratio of kept patches per image, shape (B, 1)
                 keep_ratio = torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
                              / (final_attn.shape[-1] - 1), dim=0)
-                print(f'Mean  {"training" if self.training else "validation"} keep ratio: {keep_ratio}')
+                # print(f'Mean  {"training" if self.training else "validation"} keep ratio: {keep_ratio}')
 
                 # expand scalar decision for each patch to match embedding dimension
                 keep_decision = keep_decision.repeat(1, 1, x.shape[-1])
-                patch_mask = torch.cat((cls_decision, keep_decision), dim=-2)
+                patch_mask = torch.cat((cls_decision, keep_decision), dim=1)
 
             elif i == len(self.blocks) - 1:
                 #  pass masked images through final MLP sublayer (final encoder layer was split in MSA and MLP part)
