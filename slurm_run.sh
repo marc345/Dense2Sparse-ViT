@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --output=sbatch_log/%j.out
-#SBATCH --gres=gpu:6
+#SBATCH --gres=gpu:1
 #SBATCH --mem=30G
 #SBATCH --mail-type=ALL
 ##SBATCH --array=0-11

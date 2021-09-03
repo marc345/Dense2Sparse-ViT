@@ -344,28 +344,28 @@ class VisionTransformer(nn.Module):
                 #  take average over all head instead of only head 1
                 final_attn = torch.mean(final_attn[:, :, 0:1, 1:], dim=1)  # final_attn.shape: (B, 1, N-1)
 
-                if self.training:
-                    probabilities = final_attn.permute(0, 2, 1)  # shape (B, N-1, 1)
-                    probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)  # shape (B, N-1, 2)
+                #if self.training:
+                probabilities = final_attn.permute(0, 2, 1)  # shape (B, N-1, 1)
+                probabilities = torch.cat((probabilities, 1 - probabilities), dim=-1)  # shape (B, N-1, 2)
 
-                    # binary tensor of shape (B, N-1, 1)
-                    # second element tells if patch is kept (arbitrary decision)
-                    keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1].unsqueeze(-1)
+                # binary tensor of shape (B, N-1, 1)
+                # second element tells if patch is kept (arbitrary decision)
+                keep_decision = torch.nn.functional.gumbel_softmax(probabilities, hard=True)[:, :, 1].unsqueeze(-1)
 
+                #else:
+                #    val, idx = torch.sort(final_attn)  # val.shape: (B, 1, N-1)
+                #    val /= torch.sum(val, dim=2, keepdim=True)
+                #    cumval = torch.cumsum(val, dim=2)
+                #    th_attn = cumval >= 0.5
+#
+                #    keep_decision = torch.zeros_like(th_attn)
+                #    keep_decision.scatter_(dim=-1, index=idx, src=th_attn)  # shape: (B, 1, N-1)
+                #    keep_decision = keep_decision.permute(0, 2, 1)  # shape: (B, N-1, 1)
 
-                else:
-                    val, idx = torch.sort(final_attn)  # val.shape: (B, 1, N-1)
-                    val /= torch.sum(val, dim=1, keepdim=True)
-                    cumval = torch.cumsum(val, dim=1)
-                    th_attn = cumval >= 0.5
-
-                    keep_decision = torch.zeros_like(th_attn)
-                    keep_decision.scatter_(dim=-1, index=idx, src=th_attn)  # shape: (B, 1, N-1)
-                    keep_decision = keep_decision.permute(0, 2, 1)  # shape: (B, N-1, 1)
 
                 # ratio of kept patches per image, shape (B, 1)
-                self.keeping_ratio = torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
-                             / (final_attn.shape[-1] - 1), dim=0)
+                self.keeping_ratio += torch.mean((torch.mean(torch.sum(keep_decision.detach().squeeze(-1), dim=-1, keepdim=True) \
+                             / (keep_decision.shape[1]), dim=0)), dim=0)
                 # print(f'Mean  {"training" if self.training else "validation"} keep ratio: {keep_ratio}')
 
                 # expand scalar decision for each patch to match embedding dimension
@@ -461,6 +461,9 @@ class VisionTransformer(nn.Module):
                 x = blk(x)
             else:
                 return blk(x, return_attention=True)
+
+    def get_masked_images(self, x):
+        x = self.forward_features(x)
 
     def forward_return_n_last_blocks(self, x, n=1, return_patch_avgpool=False):
         B = x.shape[0]

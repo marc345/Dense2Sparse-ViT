@@ -4,13 +4,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-from torchvision import datasets, models, transforms
+from torchvision import datasets, models, transforms, utils as vutils
 import time
 import os
 import copy
 from tqdm import tqdm
+import pathlib
 
 import vit_models
+
+#######################################################################################################################
+
+BATCH_SIZE = 256
+NUM_EPOCHS = 15
+
+#######################################################################################################################
 
 # Data augmentation and normalization for training
 # Just normalization for validation
@@ -35,8 +43,8 @@ data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
 image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
                                           data_transforms[x])
                   for x in ['train', 'val']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=256,
-                                             shuffle=True, num_workers=3)
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=BATCH_SIZE,
+                                             shuffle=True, num_workers=2)
               for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
@@ -76,11 +84,14 @@ def get_model(args, pretrained=True):
 # ------------------
 
 
-def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
+def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
     since = time.time()
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
+
+    #  overfit on single training data batch test
+    # data = { phase: next(iter(dataloaders[phase])) for phase in ['train', 'val'] }
 
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
@@ -95,13 +106,15 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
             running_loss = 0.0
             running_corrects = 0
 
-            for inputs, labels in tqdm(dataloaders[phase]):
+            for i, data in enumerate(tqdm(dataloaders[phase])):
+            # overfit on a single training data batch test
+            #for _ in tqdm(range(len(dataloaders['train']))):
+            #    inputs = data[phase][0]
+            #    labels = data[phase][1]
 ########################################################################################################################
-            #  overfit on single batch test
-            #inputs, labels = next(iter(dataloaders[phase]))
 
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+                inputs = data[0].to(device)
+                labels = data[1].to(device)
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -128,13 +141,28 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
             epoch_loss = running_loss / dataset_sizes[phase]
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-            print('{} Loss: {:.4f} Acc: {:.4f} Keeping ratio: {:.4f}'.format(
-                phase, epoch_loss, epoch_acc, model.keeping_ratio))
+            # keeping ratio averaged over batch
+            avg_keeping_ratio = model.keeping_ratio/len(dataloaders[phase])
+
+            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f} '
+                  f'Keeping ratio: {avg_keeping_ratio:.4f}')
 
             # deep copy the model
             if phase == 'val' and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
+
+                # get first 16 images in batch to visualize generated mask (batch is randomly shuffled)
+                imgs = inputs[:16]
+                imgs = model.get_masked_images(imgs)
+                save_path = f"test_imgs"
+                pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
+                # default grid size is 8 images per row
+                vutils.save_image(vutils.make_grid(imgs, normalize=False, scale_each=True),
+                                  f"{save_path}/image_{epoch}_{avg_keeping_ratio}.jpg")
+
+                # reset keeping ratio again to 0 (get's accumulated for each batch)
+                model.keeping_ratio = 0.0
 
         print()
 
@@ -170,6 +198,7 @@ for name, param in model.named_parameters():
 # Here the size of each output sample is set to 2.
 # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
 
+
 model = model.to(device)
 
 criterion = nn.CrossEntropyLoss()
@@ -185,7 +214,7 @@ exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
 
 
 model = train_model(model, criterion, optimizer_ft, exp_lr_scheduler,
-                       num_epochs=25)
+                       num_epochs=NUM_EPOCHS)
 
 ######################################################################
 
