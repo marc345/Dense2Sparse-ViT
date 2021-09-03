@@ -37,11 +37,13 @@ data_transforms = {
     ]),
 }
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 mask_test_dir = 'test_imgs'
 mask_test_dataset = datasets.ImageFolder(mask_test_dir, data_transforms['val'])
 mask_test_dataloader = torch.utils.data.DataLoader(mask_test_dataset, batch_size=16)
 mask_test_imgs = next(iter(mask_test_dataloader))[0]
-print(mask_test_imgs.shape)
+mask_test_imgs = mask_test_imgs.to(device)
 
 data_dir = 'data/hymenoptera_data'
 #data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
@@ -58,8 +60,6 @@ dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=8,
               for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def get_model(args, pretrained=True):
@@ -164,7 +164,9 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
 
                 B, _, H, W = mask_test_imgs.shape
 
-                patch_mask = model.forward_features(mask_test_imgs, return_patch_mask=True)#.detach()  # shape: (B, N, D)
+                imgs = mask_test_imgs
+
+                patch_mask = model.forward_features(imgs, return_patch_mask=True).detach()  # shape: (B, N, D)
                 patch_mask = patch_mask[:, 1:, 0]  # exclude CLS token and remove embedding dimension, shape: (B, N-1)
 
                 patches_per_image_side = int(patch_mask.shape[-1] ** 0.5)
