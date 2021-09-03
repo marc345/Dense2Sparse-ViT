@@ -15,7 +15,7 @@ import vit_models
 
 #######################################################################################################################
 
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 NUM_EPOCHS = 15
 
 #######################################################################################################################
@@ -37,17 +37,20 @@ data_transforms = {
     ]),
 }
 
-mask_test_dir = 'test_imgs/input'
+mask_test_dir = 'test_imgs'
 mask_test_dataset = datasets.ImageFolder(mask_test_dir, data_transforms['val'])
 mask_test_dataloader = torch.utils.data.DataLoader(mask_test_dataset, batch_size=16)
-mask_test_imgs = next(iter(mask_test_dataloader))
+mask_test_imgs = next(iter(mask_test_dataloader))[0]
 print(mask_test_imgs.shape)
 
 data_dir = 'data/hymenoptera_data'
 #data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
 
+#data_dir = 'data/hymenoptera_data'
+data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
+
 #image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
-image_datasets = {x: datasets.ImageFolder(data_dir,
+image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
                                           data_transforms[x])
                   for x in ['train', 'val']}
 dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=8,
@@ -175,7 +178,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
                 # default grid size is 8 images per row
                 vutils.save_image(vutils.make_grid(imgs, normalize=False, scale_each=True),
-                                  f"{save_path}/image_{epoch}_{avg_keeping_ratio}.jpg")
+                                  f"{save_path}/image_{epoch}_{avg_keeping_ratio:.2f}.jpg")
 
                 # reset keeping ratio again to 0 (get's accumulated for each batch)
                 model.keeping_ratio = 0.0
