@@ -15,7 +15,7 @@ import vit_models
 
 #######################################################################################################################
 
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 NUM_EPOCHS = 15
 
 #######################################################################################################################
@@ -37,13 +37,13 @@ data_transforms = {
     ]),
 }
 
-#data_dir = 'data/hymenoptera_data'
+data_dir = 'data/hymenoptera_data'
 #image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x),
-data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
+#data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
 image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir),
                                           data_transforms[x])
                   for x in ['train', 'val']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=BATCH_SIZE,
+dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=8,
                                              shuffle=True, num_workers=2)
               for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
@@ -154,7 +154,17 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
 
                 # get first 16 images in batch to visualize generated mask (batch is randomly shuffled)
                 imgs = inputs[:16]
-                imgs = model.get_masked_images(imgs)
+                B, _, H, W = imgs.shape
+                patch_mask = model.forward_features(imgs, return_patch_mask=True)  # shape: (B, N, D)
+                patch_mask = patch_mask[:, 1:, 0]  # exclude CLS token and remove embedding dimension, shape: (B, N-1)
+
+                patches_per_image_side = int(patch_mask.shape[-1] ** 0.5)
+                scale = int(H // patches_per_image_side)
+
+                patch_mask = patch_mask.reshape(B, patches_per_image_side, patches_per_image_side)
+                patch_mask = torch.nn.functional.interpolate(patch_mask.unsqueeze(1), scale_factor=scale, mode="nearest")
+                imgs = imgs * patch_mask
+
                 save_path = f"test_imgs"
                 pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
                 # default grid size is 8 images per row
