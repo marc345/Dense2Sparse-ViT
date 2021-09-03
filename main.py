@@ -162,11 +162,11 @@ num_ftrs = model.head.in_features
 
 for name, param in model.named_parameters():
     if 'blocks.11' in name or 'blocks.12'  in name or 'head.' in name or 'norm.' in name:
-        print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
+        # print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
         continue
     else:
         param.requires_grad = False
-    print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
+    # print(f'{name}: {"" if param.requires_grad else "does not"}  require grad')
 # Here the size of each output sample is set to 2.
 # Alternatively, it can be generalized to nn.Linear(num_ftrs, len(class_names)).
 
