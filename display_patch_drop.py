@@ -31,14 +31,13 @@ class CustomDataSet(Dataset):
 
 
 def generate_patch_drop_masked_image(model, images):
-    for drop_best in [False, True]:
+    for drop_best in [True, False]:
 
         for drop_rate in range(10, 100, 10):
 
             print(f'Dropping {drop_rate}% of {"foreground" if drop_best else "background"} patches')
 
             images = imgs.clone()
-
 
             attentions = model.forward_selfattention(images).detach()
             num_heads = attentions.shape[1]
@@ -120,7 +119,7 @@ if __name__ == '__main__':
 
     data_dir = 'test_imgs/input/custom/'
     image_dataset = CustomDataSet(data_dir, transform=data_transform)
-    dataloader = torch.utils.data.DataLoader(image_dataset, batch_size=16, num_workers=2)
+    dataloader = torch.utils.data.DataLoader(image_dataset, batch_size=32, num_workers=2)
 
     dataset_size = len(image_dataset)
 
