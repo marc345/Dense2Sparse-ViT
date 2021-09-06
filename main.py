@@ -4,15 +4,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-import numpy as np
-from torchvision import datasets, models, transforms
+from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 import time
 import os
 import copy
 from tqdm import tqdm
 
-import vit_models
+from utils import get_model, parse_args
+
 
 plt.ion()   # interactive mode
 
@@ -44,32 +44,6 @@ dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-def get_model(args, pretrained=True):
-    model_names = sorted(name for name in models.__dict__
-                         if name.islower() and not name.startswith("__")
-                         and callable(models.__dict__[name]))
-
-    if 'dino_small_dist' in args['model_name']:
-        model = vit_models.dino_small_dist(patch_size=args.get("patch_size", 16), pretrained=pretrained)
-        mean = (0.485, 0.456, 0.406)
-        std = (0.229, 0.224, 0.225)
-    elif 'dino_tiny_dist' in args['model_name']:
-        model = vit_models.dino_tiny_dist(patch_size=args.get("patch_size", 16), pretrained=pretrained)
-        mean = (0.485, 0.456, 0.406)
-        std = (0.229, 0.224, 0.225)
-    elif 'dino_small' in args['model_name']:
-        model = vit_models.dino_small(patch_size=args.get("patch_size", 16), pretrained=pretrained)
-        mean = (0.485, 0.456, 0.406)
-        std = (0.229, 0.224, 0.225)
-    elif 'dino_tiny' in args['model_name']:
-        model = vit_models.dino_tiny(patch_size=args.get("patch_size", 16), pretrained=pretrained)
-        mean = (0.485, 0.456, 0.406)
-        std = (0.229, 0.224, 0.225)
-    else:
-        raise NotImplementedError(f'Please provide correct model names: {model_names}')
-
-    return model, mean, std
 
 
 ######################################################################
@@ -145,11 +119,6 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
 
 ######################################################################
-
-args = {
-    'model_name': 'dino_small',
-    'patch_size': 16
-}
 
 # get the model specified as argument
 model, mean, std = get_model(args=args)

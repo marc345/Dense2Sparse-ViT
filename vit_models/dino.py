@@ -430,7 +430,7 @@ def dino_tiny(patch_size=16, **kwargs):
 
 
 @register_model
-def dino_tiny_dist(patch_size=16, pretrained=False, **kwargs):
+def dino_tiny_dist(patch_size=16, **kwargs):
     model = DistilledVisionTransformer(
         patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -471,7 +471,7 @@ def dino_base(patch_size=16, pretrained=False, **kwargs):
 
 
 @register_model
-def dino_small_dist(patch_size=16, pretrained=False, **kwargs):
+def dino_small_dist(patch_size=16, **kwargs):
     model = DistilledVisionTransformer(
         patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
