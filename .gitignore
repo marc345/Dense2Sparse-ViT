@@ -1,5 +1,6 @@
 test_imgs/
 sbatch_log/
+runs/
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template
