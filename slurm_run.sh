@@ -1,11 +1,7 @@
 #!/bin/bash
 #SBATCH --output=sbatch_log/%j.out
 #SBATCH --gres=gpu:1
-<<<<<<< HEAD
-#SBATCH --mem=30G
-=======
 #SBATCH --mem=50G
->>>>>>> optimized_attention_map
 #SBATCH --mail-type=ALL
 #SBATCH --array=1-11
 
