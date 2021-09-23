@@ -8,6 +8,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import warnings
 from timm.models.registry import register_model
@@ -78,13 +79,6 @@ class DropPath(nn.Module):
 
 
 class Mlp(nn.Module):
-    """
-        FFN of Vision Transformer Encoder Layer
-        1 Linear Layer followed by a GELU nonlinearity
-        +
-        1 Linear Layer followed by dropout
-        Intermediate dimension may differ if specified (usually larger than D) otherwise it's the same a D
-    """
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
@@ -104,12 +98,6 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    """
-        MSA Module (Self attention in parallel in H heads)
-        Input shape: (B, N, D)
-        Q, K, V shape: (B, H, N, D/H)
-        Output shape: (B, N, D)
-    """
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
@@ -121,27 +109,43 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # each of shape (B, H, N, D/H)
+    def softmax_with_policy(self, attn, policy, eps=1e-6):
+        B, N, _ = policy.size()
+        B, H, N, N = attn.size()
+        attn_policy = policy.reshape(B, 1, 1, N)  # * policy.reshape(B, 1, N, 1)
+        eye = torch.eye(N, dtype=attn_policy.dtype, device=attn_policy.device).view(1, 1, N, N)
+        attn_policy = attn_policy + (1.0 - attn_policy) * eye
+        max_att = torch.max(attn, dim=-1, keepdim=True)[0]
+        attn = attn - max_att
+        # attn = attn.exp_() * attn_policy
+        # return attn / attn.sum(dim=-1, keepdim=True)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # shape: (B, H, N, N)
-        attn = attn.softmax(dim=-1)  # row wise softmax (summing along direction of column dimension means summing over rows)
+        # for stable training
+        attn = attn.to(torch.float32).exp_() * attn_policy.to(torch.float32)
+        attn = (attn + eps / N) / (attn.sum(dim=-1, keepdim=True) + eps)
+        return attn.type_as(max_att)
+
+    def forward(self, x, policy=None):
+        B, N, D = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, D // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        if policy is None:
+            attn = attn.softmax(dim=-1)
+        else:
+            attn = self.softmax_with_policy(attn, policy)
+
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, D)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn
 
 
 class Block(nn.Module):
-    """
-        Vision Transformer Encoder Layer
-        Intermediate_Output = Input + MSA(Input)
-        Output = Intermediate_Output + FFN(Intermediate_Output)
-    """
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
@@ -163,7 +167,8 @@ class Block(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding """
+    """ Image to Patch Embedding
+    """
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
@@ -172,15 +177,10 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.num_patches = num_patches
 
-        # patchify image by convolution with kernel and stride of patch size
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        #  H = W = sqrt(num_patches)
-        #  C = embed_dim, 768 for base
         B, C, H, W = x.shape
-        #  flatten last 2 dimensions (H & W) to obtain token sequence from patches N = H/patch_size * W/patch_size
-        #  also change shape to (B, N, D)
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
@@ -255,19 +255,12 @@ class VisionTransformer(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
 
-        #  add batch dimension to CLS token without changing token and embedding dimension (-1)
-        #  this is done to create a different CLS token (parameter) for every patchified image in the batch
-        #  for the positional embedding this needs to be done because the positional embedding is the same
-        #  for each image and changes only for the patches within the image
         cls_tokens = self.cls_token.expand(B, -1, -1)
-        #  prepend cls token to token list of patchified images
         x = torch.cat((cls_tokens, x), dim=1)
         pos_embed = self.interpolate_pos_encoding(x, self.pos_embed)
-        #  add positional embedding
         x = x + pos_embed
         x = self.pos_drop(x)
 
-        #  pass through transformer's encoder layers
         for blk in self.blocks:
             x = blk(x)
         if self.norm is not None:
@@ -276,86 +269,65 @@ class VisionTransformer(nn.Module):
         return x[:, 0]
 
     def interpolate_pos_encoding(self, x, pos_embed):
-        """
-            Add positional encoding for additional tokens in the sequence in case of larger images
-            Creates positional encoding tokens for the additional patch tokens by bicubic interpolation
-            of the existing positional encoding
-        """
         npatch = x.shape[1] - 1
         N = pos_embed.shape[1] - 1
         if npatch == N:
-            #  return positional embedding if the image is of the right size for that the positional
-            #  embedding was created for (larger/smaller images yield different number of patches/sequence length)
             return pos_embed
-        #  otherwise interpolate the positional embedding to account for missing positions
         class_emb = pos_embed[:, 0]
         pos_embed = pos_embed[:, 1:]
         dim = x.shape[-1]
         pos_embed = nn.functional.interpolate(
-            #  reshape positional embedding into image shape: (B, H, W, C) and permute to (B, C, H, W) before interpolating
             pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
             scale_factor=math.sqrt(npatch / N),
             mode='bicubic',
         )
-        #  permute and reshape back into new shape (B, N_new, D)
         pos_embed = pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        #  prepend positional embedding for CLS token again to interpolated positional embedding
         return torch.cat((class_emb.unsqueeze(0), pos_embed), dim=1)
 
-    def forward_selfattention(self, x):
-        """
-            Pass input image through Transformer encoder layers and return the self-attention map (shape: B, H, N, N)
-            from the last layer
-        """
-        B, nc, w, h = x.shape
-        x = self.patch_embed(x)
 
-        # interpolate patch embeddings
-        dim = x.shape[-1]
-        w0 = w // self.patch_embed.patch_size
-        h0 = h // self.patch_embed.patch_size
-        class_pos_embed = self.pos_embed[:, 0]
-        if self.pos_embed.shape[1] == 198:
-            N = self.pos_embed.shape[1] - 2
-            dist_pos_embed = self.pos_embed[:, 1]
-            patch_pos_embed = self.pos_embed[:, 2:]
-        else:
-            N = self.pos_embed.shape[1] - 1
-            patch_pos_embed = self.pos_embed[:, 1:]
-        patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
-            mode='bicubic',
+class PredictorLG(nn.Module):
+    """ Image to Patch Embedding
+    """
+    def __init__(self, embed_dim=384):
+        super().__init__()
+        self.in_conv = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU()
         )
-        if w0 != patch_pos_embed.shape[-2]:
-            helper = torch.zeros(h0)[None, None, None, :].repeat(1, dim, w0 - patch_pos_embed.shape[-2], 1).to(x.device)
-            patch_pos_embed = torch.cat((patch_pos_embed, helper), dim=-2)
-        if h0 != patch_pos_embed.shape[-1]:
-            helper = torch.zeros(w0)[None, None, :, None].repeat(1, dim, 1, h0 - patch_pos_embed.shape[-1]).to(x.device)
-            patch_pos_embed = torch.cat((patch_pos_embed, helper), dim=-1)
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        if self.pos_embed.shape[1] == 198:
-            pos_embed = torch.cat((class_pos_embed.unsqueeze(0), dist_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
-        else:
-            pos_embed = torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        if self.pos_embed.shape[1] == 198:
-            dist_token = self.dist_token.expand(B, -1, -1)
-            x = torch.cat((cls_tokens, dist_token, x), dim=1)
-        else:
-            x = torch.cat((cls_tokens, x), dim=1)
-        x = x + pos_embed
-        x = self.pos_drop(x)
+        self.out_conv = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(embed_dim // 2, embed_dim // 4),
+            nn.GELU(),
+            nn.Linear(embed_dim // 4, 2),
+            nn.LogSoftmax(dim=-1)
+        )
 
-        for i, blk in enumerate(self.blocks):
-            if i < len(self.blocks) - 1:
-                x = blk(x)
-            else:
-                return blk(x, return_attention=True)
+    def forward(self, x):
+        x = self.in_conv(x)
+        B, N, D = x.size()
+        local_x = x[:,:, :D//2]
+        global_x = (x[:,:, D//2:]).sum(dim=1, keepdim=True) / N
+        x = torch.cat([local_x, global_x.expand(B, N, D//2)], dim=-1)
+        return self.out_conv(x)
 
-    def forward_return_n_last_blocks(self, x, n=1, return_patch_avgpool=False):
-        B = x.shape[0]
+class PredictorVisionTransformer(VisionTransformer):
+    def __init__(self, prun_loc=0, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pruning_location = prun_loc
+        self.predictor = PredictorLG(embed_dim=self.embed_dim)
+
+    def forward(self, x, masks):
+
+        output = self.forward_features(x, masks)
+
+        # Run the head forward on the concatenated features.
+        return self.head(output)
+
+    def forward_features(self, x, masks):
+        B, N, D = x.shape
         x = self.patch_embed(x)
 
         cls_tokens = self.cls_token.expand(B, -1, -1)
@@ -364,19 +336,26 @@ class VisionTransformer(nn.Module):
         x = x + pos_embed
         x = self.pos_drop(x)
 
-        # we will return the [CLS] tokens from the `n` last blocks
-        output = []
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
-            if len(self.blocks) - i <= n:
-                output.append(self.norm(x)[:, 0])
-        if return_patch_avgpool:
+            if i == self.pruning_location:
+                pred_score = self.predictor(x[:, 1:])
+                if self.training:
+                    hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1]
+                    cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
+                    policy = torch.cat((cls_policy, hard_keep_decision), dim=1)
+                else:
+                    pred_score = pred_score[:,:,0]
+                    num_patches_kept = int(0.7 * (N-1))
+                    sorted_idxs = torch.argsort(pred_score, dim=1, descending=True)
+                    sorted_idxs = sorted_idxs.unsqueeze(-1).expand(B, N-1, D) + 1  # indexes start at 1 as CLS is always kept
+                    sorted_idxs = torch.cat((torch.zeros((B, 1, D), dtype=x.type, device=x.device), sorted_idxs), dim=1)  # 0 index in order to have CLS token prepended
+                    x = torch.gather(input=x, dim=1, index=sorted_idxs)[:, :num_patches_kept+1]  # keep only CLS token and most vital patches
+                    policy = None
+            x = blk(x, policy=policy)
+        if self.norm is not None:
             x = self.norm(x)
-            # In addition to the [CLS] tokens from the `n` last blocks, we also return 
-            # the patch tokens from the last block. This is useful for linear eval.
-            output.append(torch.mean(x[:, 1:], dim=1))
-        return torch.cat(output, dim=-1)
 
+        return x[:, 0]
 
 class DistilledVisionTransformer(VisionTransformer):
     def __init__(self, *args, **kwargs):
@@ -420,6 +399,55 @@ class DistilledVisionTransformer(VisionTransformer):
             return (x + x_dist) / 2
 
 
+class MaskedVisionTransformer(VisionTransformer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prob_norm = torch.nn.LogSoftmax(dim=-1)
+        self.keeping_ratio = None
+
+    def forward_features(self, x, masks):
+        # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
+        # with slight modifications to add the dist_token
+        B = x.shape[0]
+        x = self.patch_embed(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        B, N, D = x.shape
+
+        masks = self.prob_norm(masks)
+        patch_keep_decisions = F.gumbel_softmax(masks, hard=True)[:, :, 0:1]
+        self.keeping_ratio = torch.sum(patch_keep_decisions[:, :, 0].detach()) / (
+                patch_keep_decisions.shape[0] * patch_keep_decisions.shape[1])
+
+        cls_keep_decision = torch.ones((B, 1, 1), dtype=masks.dtype, device=masks.device)
+        keep_decisions = torch.cat((cls_keep_decision, patch_keep_decisions), dim=1)
+
+        #x = x * keep_decisions
+
+        layer_wise_tokens = []
+        for i, blk in enumerate(self.blocks):
+            # drop patches before last encoder layer
+            #if i == 11:
+            #   x = x * keep_decisions
+            x = blk(x)
+            layer_wise_tokens.append(x)
+
+        layer_wise_tokens = [self.norm(x) for x in layer_wise_tokens]
+        return [x[:, 0] for x in layer_wise_tokens], keep_decisions
+
+
+    def forward(self, x, masks):
+        list_out, keep_decisions = self.forward_features(x, masks)
+        x = [self.head(x) for x in list_out]
+
+        return [out for out in x], keep_decisions
+
+
 @register_model
 def dino_tiny(patch_size=16, **kwargs):
     model = VisionTransformer(
@@ -453,65 +481,85 @@ def dino_small(patch_size=16, pretrained=False, **kwargs):
 
     return model
 
-
 @register_model
-def dino_base(patch_size=16, pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+def dino_small_predictor(patch_size=16, pretrained=False, **kwargs):
+    model = PredictorVisionTransformer(
+        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model_url = {
-        16: "https://dl.fbaipublicfiles.com/dino/dino_vitbase16_pretrain/dino_vitbase16_pretrain.pth",
-        8: "https://dl.fbaipublicfiles.com/dino/dino_vitbase8_pretrain/dino_vitbase8_pretrain.pth"
+        16: "https://dl.fbaipublicfiles.com/dino/dino_deitsmall16_pretrain/dino_deitsmall16_pretrain.pth",
+        8: "https://dl.fbaipublicfiles.com/dino/dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
     }
     if pretrained:
         state_dict = torch.hub.load_state_dict_from_url(model_url[patch_size])
+        model_dict = model.state_dict()
         model.load_state_dict(state_dict, strict=False)
 
+        # 1. filter out unnecessary keys
+        filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict}
+        # 2. overwrite entries in the existing state dict
+        model_dict.update(filtered_dict)
+        # 3. load the new state dict
+        model.load_state_dict(model_dict)
+
+    return model
+
+@register_model
+<<<<<<< HEAD
+def dino_small_dist(patch_size=16, **kwargs):
+    model = DistilledVisionTransformer(
+=======
+def dino_small_masked(patch_size=16, pretrained=False, **kwargs):
+    model = MaskedVisionTransformer(
+>>>>>>> optimized_attention_map
+        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model_url = {
+        16: "https://dl.fbaipublicfiles.com/dino/dino_deitsmall16_pretrain/dino_deitsmall16_pretrain.pth",
+        8: "https://dl.fbaipublicfiles.com/dino/dino_deitsmall8_300ep_pretrain/dino_deitsmall8_300ep_pretrain.pth"
+    }
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url(model_url[patch_size])
+        model_dict = model.state_dict()
+
+        # 1. filter out unnecessary keys
+        filtered_dict = {k: v for k, v in state_dict['model'].items() if k in model_dict}
+        # 2. overwrite entries in the existing state dict
+        model_dict.update(filtered_dict)
+        # 3. load the new state dict
+        model.load_state_dict(model_dict)
+
+    return model
+
+@register_model
+def dino_base(patch_size=16, **kwargs):
+    model = VisionTransformer(
+        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 
 @register_model
-def dino_small_dist(patch_size=16, **kwargs):
+def dino_small_dist(patch_size=16, pretrained=False, **kwargs):
     model = DistilledVisionTransformer(
         patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
 
     return model
 
+@register_model
+def dino_small_patch16_224_masked(pretrained=False, **kwargs):
+    model = MaskedVisionTransformer(
+        patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url("https://dl.fbaipublicfiles.com/dino/dino_deitsmall16_pretrain/dino_deitsmall16_pretrain.pth")
+        model_dict = model.state_dict()
 
-class DINOHead(nn.Module):
-    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048,
-                 bottleneck_dim=256):
-        super().__init__()
-        nlayers = max(nlayers, 1)
-        if nlayers == 1:
-            self.mlp = nn.Linear(in_dim, bottleneck_dim)
-        else:
-            layers = [nn.Linear(in_dim, hidden_dim)]
-            if use_bn:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.GELU())
-            for _ in range(nlayers - 2):
-                layers.append(nn.Linear(hidden_dim, hidden_dim))
-                if use_bn:
-                    layers.append(nn.BatchNorm1d(hidden_dim))
-                layers.append(nn.GELU())
-            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
-            self.mlp = nn.Sequential(*layers)
-        self.apply(self._init_weights)
-        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
-        self.last_layer.weight_g.data.fill_(1)
-        if norm_last_layer:
-            self.last_layer.weight_g.requires_grad = False
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        x = self.mlp(x)
-        x = nn.functional.normalize(x, dim=-1, p=2)
-        x = self.last_layer(x)
-        return x
+        # 1. filter out unnecessary keys
+        filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict}
+        # 2. overwrite entries in the existing state dict
+        model_dict.update(filtered_dict)
+        # 3. load the new state dict
+        model.load_state_dict(model_dict)
+    return model

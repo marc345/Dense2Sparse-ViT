@@ -9,3 +9,4 @@ from .t2t_vit_se import *
 from .tnt import *
 from .vit import *
 from .resnet import drop_resnet50
+from .dynamic_vit import *
