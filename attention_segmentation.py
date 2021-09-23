@@ -61,7 +61,7 @@ def apply_mask_last(image, mask, color=(0.0, 0.0, 1.0), alpha=0.5):
 
 def generate_patch_mask(image_height, keep_decisions):
 
-    patch_mask = keep_decisions[:, 0].float()  # remove embedding dimension, shape: (B, N)
+    patch_mask = keep_decisions.float()  # shape: (B, N)
 
     patches_per_image_side = int(patch_mask.shape[-1] ** 0.5)
     scale = int(image_height // patches_per_image_side)
@@ -71,8 +71,8 @@ def generate_patch_mask(image_height, keep_decisions):
 
     return patch_mask
 
-def display_patch_drop(images, keep_decisions, save_path, epoch_num, classifications, final_cls_attn=None,
-                       th_attn_mask=None, display_segmentation=False, max_heads=True, alpha=0.5):
+def display_patch_drop(images, keep_decisions, save_path, args, epoch_num, classifications, final_cls_attn=None,
+                       patch_indices=None, th_attn_mask=None, display_segmentation=False, max_heads=True, alpha=0.5):
     B, _, H, W = images.shape
 
     if epoch_num == 0:
@@ -85,7 +85,12 @@ def display_patch_drop(images, keep_decisions, save_path, epoch_num, classificat
     patch_drop_mask = generate_patch_mask(H, keep_decisions)
 
     if final_cls_attn is not None:
-        final_cls_attn_mask = generate_patch_mask(H, final_cls_attn)
+        sorted_final_cls_attn_mask = torch.cat((final_cls_attn, torch.zeros_like(patch_indices[1])), dim=1)
+        final_cls_attn_mask = torch.empty_like(sorted_final_cls_attn_mask)
+        final_cls_attn_mask.scatter_(dim=1, index=torch.cat(patch_indices, dim=1).long(),
+                                     src=sorted_final_cls_attn_mask)
+        final_cls_attn_mask /= torch.sum(final_cls_attn_mask, dim=1, keepdim=True)
+        final_cls_attn_mask = generate_patch_mask(H, final_cls_attn_mask)
 
     images = images * patch_drop_mask.permute(0, 2, 3, 1).cpu().numpy()
 
@@ -151,7 +156,8 @@ def save_image_grid(num_rows, num_cols, save_path, images, epoch_num, final_cls_
             axs[row, col].set_title(title_str, fontsize=34)
             axs[row, col].imshow(images[(row * num_cols) + col], interpolation='nearest')
             if final_cls_attn is not None:
-                axs[row, col].imshow(final_cls_attention[(row * num_cols) + col], cmap='hot', alpha=0.1, interpolation='nearest')
+                axs[row, col].imshow(final_cls_attn[(row * num_cols) + col].squeeze(0),
+                                     cmap='hot', alpha=0.1, interpolation='nearest')
 
     fig.suptitle(f'Epoch {epoch_num}\n'
                  f'{"With Jaccard index between kept patches and attention segmentation mask" if display_segmentation else ""}',

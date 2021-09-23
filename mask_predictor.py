@@ -79,14 +79,14 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
     best_acc = 0.0
 
     #  overfit on single training data batch test
-    data = {phase: next(iter(data_loaders[phase])) for phase in ['train', 'val']}
-    batch_repeat_factor = 1
+    #data = {phase: next(iter(data_loaders[phase])) for phase in ['train', 'val']}
+    #batch_repeat_factor = 1
 
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch+1, num_epochs))
         print('-' * 10)
 
-        for phase in ['val']:
+        for phase in ['train', 'val']:
 
             if phase == 'train':
                 warmup_step = 3
@@ -99,14 +99,17 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
 
             model.train(mode=(phase == 'train'))
 
-            #for i, data in enumerate(tqdm(data_loaders[phase])):
-            for _ in tqdm(range(batch_repeat_factor)):
+            for i, data in enumerate(tqdm(data_loaders[phase])):
+            #for _ in tqdm(range(batch_repeat_factor)):
 
-                inputs = data[phase][0].to(args.device)
-                labels = data[phase][1].to(args.device)
+                inputs = data[0].to(args.device)
+                labels = data[1].to(args.device)
 
-                mask_test_imgs = data[phase][0].to(args.device)
-                mask_test_labels = data[phase][1].to(args.device)
+                #inputs = data[phase][0].to(args.device)
+                #labels = data[phase][1].to(args.device)
+                #mask_test_imgs = data['val'][0].to(args.device)
+                #mask_test_labels = data['val'][1].to(args.device)
+
                 # zero the parameter gradients
                 optimizer.zero_grad()
 
@@ -158,40 +161,42 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
                 writer.add_scalar(f'{phase}_metrics/total_acc', epoch_acc, epoch)
                 writer.add_scalar(f'{phase}_metrics/total_loss', epoch_loss, epoch)
                 writer.add_scalar(f'{phase}_metrics/kept_token_ratio', model.token_ratio[-1], epoch)
-                writer.add_scalar(f'{phase}_metrics/cls_loss', criterion.cls_loss, epoch)
-                writer.add_scalar(f'{phase}_metrics/ratio_loss', criterion.ratio_loss, epoch)
-                writer.add_scalar(f'{phase}_metrics/cls_dist_loss', criterion.cls_distill_loss, epoch)
-                writer.add_scalar(f'{phase}_metrics/token_distill_loss', criterion.token_distill_loss, epoch)
+                writer.add_scalar(f'{phase}_metrics/cls_loss', criterion.cls_loss/criterion.count, epoch)
+                writer.add_scalar(f'{phase}_metrics/ratio_loss', criterion.ratio_loss/criterion.count, epoch)
+                writer.add_scalar(f'{phase}_metrics/cls_dist_loss', criterion.cls_distill_loss/criterion.count, epoch)
+                writer.add_scalar(f'{phase}_metrics/token_distill_loss', criterion.token_distill_loss/criterion.count, epoch)
 
         with torch.no_grad():
             model.eval()
             test_outs, final_cls_attn, final_policy = model(mask_test_imgs.clone())
             test_preds = torch.argmax(test_outs, dim=1)
 
-            #for i, decision in enumerate(getattr(model, "decisions")):
+            # list that holds the original patch indices (based on initial, unpruned tokens sequence) sorted in
+            # descending order based on the prediction scores of the respective prediction module (length of list is
+            # equal to the number of prediction modules)
             decisions = getattr(model, "sorted_patch_indices")
             final_decision = decisions[-1]
             num_final_kept_tokens = int(decisions[0].shape[1] * model.token_ratio[-1])
+            # indices of kept tokens after the final predictor module
             kept_token_idx = final_decision[:, :num_final_kept_tokens]
-            #dropped_token_idx = final_decision[:, num_keep_tokens:]
             dropped_token_idx = []
             for i, decision in enumerate(decisions):
                 num_kept_tokens = int(decisions[0].shape[1] * model.token_ratio[i])
                 dropped_token_idx.append(decision[:, num_kept_tokens:])
+            # all the token indices corresponding to the dropped patches
             dropped_token_idx = torch.cat(dropped_token_idx, dim=1)
             token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
             keep_mask = torch.ones_like(kept_token_idx)
             drop_mask = torch.zeros_like(dropped_token_idx)
             sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
             patch_drop_mask = torch.empty_like(sorted_patch_drop_mask)
-            patch_drop_mask = patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask)\
-                .unsqueeze(-1)
-
+            patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask).unsqueeze(-1)
             # only display result after last predictor stage
             attention_segmentation.display_patch_drop(mask_test_imgs.cpu(), patch_drop_mask.cpu(),
-                                                      f"test_imgs/mask_predictor/{args.job_name}", epoch,
+                                                      f"test_imgs/mask_predictor/{args.job_name}", args, epoch,
                                                       (test_preds == mask_test_labels).cpu().numpy(),
-                                                      final_cls_attn=final_cls_attn[:, 0, 1:],
+                                                      final_cls_attn=torch.max(final_cls_attn[:, :, 1:], dim=1)[0].cpu(),
+                                                      patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
                                                       display_segmentation=False, max_heads=True)
 
     time_elapsed = time.time() - since
@@ -263,6 +268,7 @@ if __name__ == '__main__':
 
         criterion = losses.DistillDiffPruningLoss(teacher_model=teacher, clf_weight=args.cls_weight,
                                                   ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
+                                                  pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
                                                   base_criterion=torch.nn.CrossEntropyLoss())
 
         #cosine_lr_scheduler = CosineLRScheduler(optimizer, t_initial=30, lr_min=1e-5, decay_rate=0.1, warmup_t=5,

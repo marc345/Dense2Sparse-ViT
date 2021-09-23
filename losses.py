@@ -142,12 +142,12 @@ class DistillDiffPruningLoss(torch.nn.Module):
             self.cls_distill_loss += cls_kl_loss.item()
             self.token_distill_loss += token_kl_loss.item()
             self.count += 1
-            if self.count == 100:
+            if self.count%100 == 0:
                 print('loss info: cls_loss=%.4f, ratio_loss=%.4f, cls_kl=%.4f, token_kl=%.4f' % (
                 self.cls_loss / 100, self.ratio_loss / 100, self.cls_distill_loss / 100, self.token_distill_loss / 100))
-                self.count = 0
-                self.cls_loss = 0
-                self.ratio_loss = 0
-                self.cls_distill_loss = 0
-                self.token_distill_loss = 0
+                #self.count = 0
+                #self.cls_loss = 0
+                #self.ratio_loss = 0
+                #self.cls_distill_loss = 0
+                #self.token_distill_loss = 0
         return loss

@@ -3,12 +3,12 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50G
 #SBATCH --mail-type=ALL
-#SBATCH --array=1-12
+#SBATCH --array=1-11
 
 eval "$(/itet-stor/segerm/net_scratch/conda/bin/conda shell.bash hook)"
 conda activate pytcu10
 
-DATA_PATH="/scratch_net/biwidl215/segerm/ImageNetVal2012_split"  # seems to run faster from here??
+DATA_PATH="/scratch_net/biwidl215/segerm/ImageNetVal2012"  # seems to run faster from here??
 #DATA_PATH="/srv/beegfs-benderdata/scratch/density_estimation/data/segerm/ImageNetVal2012_split"
 
 #python -u -m pip install -r requirements.txt
@@ -17,5 +17,5 @@ DATA_PATH="/scratch_net/biwidl215/segerm/ImageNetVal2012_split"  # seems to run 
 
 python -u mask_predictor.py --is-sbatch --imgnet-val-dir $DATA_PATH  --batch-size 64 --epochs 20 --ratio-weight 2.0 \
   --pruning-locs $SLURM_ARRAY_TASK_ID --keep-ratios 0.4
-
+#$SLURM_ARRAY_TASK_ID
 #python -u ddp_hello_world.py "$@"
