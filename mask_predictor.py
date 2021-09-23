@@ -80,11 +80,11 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
 
     #  overfit on single training data batch test
     #data = {phase: next(iter(data_loaders[phase])) for phase in ['train', 'val']}
-    #batch_repeat_factor = 1
+    batch_repeat_factor = 1
 
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch+1, num_epochs))
-        print('-' * 10)
+        print('-' * 50)
 
         for phase in ['train', 'val']:
 
@@ -100,7 +100,10 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
             model.train(mode=(phase == 'train'))
 
             for i, data in enumerate(tqdm(data_loaders[phase])):
-            #for _ in tqdm(range(batch_repeat_factor)):
+
+                if not args.is_sbatch and (i == batch_repeat_factor):
+                    #break after batch_repeat_factor iterations during debug job
+                    break
 
                 inputs = data[0].to(args.device)
                 labels = data[1].to(args.device)
@@ -170,6 +173,8 @@ def train_model(args, model, criterion, optimizer, num_epochs=10):
             model.eval()
             test_outs, final_cls_attn, final_policy = model(mask_test_imgs.clone())
             test_preds = torch.argmax(test_outs, dim=1)
+
+            sorted_attn, sort_idx = torch.sort(final_cls_attn)
 
             # list that holds the original patch indices (based on initial, unpruned tokens sequence) sorted in
             # descending order based on the prediction scores of the respective prediction module (length of list is
