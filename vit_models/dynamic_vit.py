@@ -31,6 +31,8 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 
+from .peturbed_topk import PerturbedTopK
+
 _logger = logging.getLogger(__name__)
 
 
@@ -236,10 +238,11 @@ class Block(nn.Module):
 
     def forward(self, x, policy=None, return_cls_attn=False):
         if return_cls_attn:
-            x, final_cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=return_cls_attn)
-            x = x + self.drop_path(x)
+            # return cls_attn in case the patch selection is based upon it and not on scores from the predictor modules
+            x_attn, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
+            x = x + self.drop_path(x_attn)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
-            return x, final_cls_attn
+            return x, cls_attn
         else:
             x = x + self.drop_path(self.attn(self.norm1(x), policy=policy))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
@@ -313,7 +316,7 @@ class HybridEmbed(nn.Module):
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, embed_dim=384):
+    def __init__(self, embed_dim=384, topk_selection=False, k=None):
         super().__init__()
         self.in_conv = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -321,22 +324,44 @@ class PredictorLG(nn.Module):
             nn.GELU()
         )
 
-        self.out_conv = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.GELU(),
-            nn.Linear(embed_dim // 2, embed_dim // 4),
-            nn.GELU(),
-            nn.Linear(embed_dim // 4, 2),
-            nn.LogSoftmax(dim=-1)
-        )
+        self.topk_selection = topk_selection
 
-    def forward(self, x, policy):
+        if topk_selection and k is not None:
+            self.out_conv = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim // 2),
+                nn.GELU(),
+                nn.Linear(embed_dim // 2, embed_dim // 4),
+                nn.GELU(),
+                nn.Linear(embed_dim // 4, 1),
+                nn.Softmax(dim=-2)  # normalize patch scores
+            )
+            self.topk = PerturbedTopK(k)
+        else:
+            self.out_conv = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim // 2),
+                nn.GELU(),
+                nn.Linear(embed_dim // 2, embed_dim // 4),
+                nn.GELU(),
+                nn.Linear(embed_dim // 4, 2),
+                nn.LogSoftmax(dim=-1)
+            )
+
+
+    def forward(self, x, policy, current_sigma=0.05):
         x = self.in_conv(x)
         B, N, C = x.size()
         local_x = x[:,:, :C//2]
         global_x = (x[:,:, C//2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
         x = torch.cat([local_x, global_x.expand(B, N, C//2)], dim=-1)
-        return self.out_conv(x)
+
+        if self.topk_selection:
+            x = self.out_conv(x).squeeze(-1)
+            if self.training:
+                return self.topk(x, current_sigma=current_sigma)
+            else:
+                return x
+        else:
+            return self.out_conv(x)
 
 
 class VisionTransformerDiffPruning(nn.Module):
@@ -348,7 +373,8 @@ class VisionTransformerDiffPruning(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 pruning_loc=None, token_ratio=None, distill=False):
+                 pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
+                 topk_selection=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -370,7 +396,7 @@ class VisionTransformerDiffPruning(nn.Module):
         """
         super().__init__()
 
-        print('## diff vit pruning method')
+        print(f'## diff vit pruning method: {"differentiable top-k selection" if topk_selection else "gumbel softmax"}')
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
@@ -408,16 +434,27 @@ class VisionTransformerDiffPruning(nn.Module):
         # Classifier head
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-        predictor_list = [PredictorLG(embed_dim) for _ in range(len(pruning_loc))]
+        predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
+                                      k=int(token_ratio[i]*(img_size/patch_size)**2)) for i in range(len(pruning_loc))]
 
         self.score_predictor = nn.ModuleList(predictor_list)
 
+        ########################################  DYNAMIC VIT MODIFICATONS #############################################
         # a list of the sorted patch indices (before dropping and based on the original token sequence length) where
         # sorting was done based on the prediction modules scores in descending order
         # len --> number of prediction modules
         self.sorted_patch_indices = []
         # the number of kept tokens during training at each prediction module
         self.num_kept_tokens = []
+
+        self.attn_selection = attn_selection
+        self.attn_selection_threshold = attn_selection_threshold
+        self.cls_attn = []
+
+        self.topk_selection = topk_selection
+        if self.topk_selection:
+            self.current_sigma = 0.05
+        ################################################################################################################
 
         self.distill = distill
 
@@ -466,30 +503,42 @@ class VisionTransformerDiffPruning(nn.Module):
 
         self.sorted_patch_indices = []
         self.num_kept_tokens = []
+        self.cls_attn = []
 
         for i, blk in enumerate(self.blocks):
             if i in self.pruning_loc:
-                spatial_x = x[:, 1:]
-                pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
-                if self.training:
-                    hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
-                    self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision, dim=1)/
-                                                           hard_keep_decision.shape[1]))
-                    out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
-                    cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
-                    policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
-                    x = blk(x, policy=policy)
-                    prev_decision = hard_keep_decision
+                spatial_x = x[:, 1:]  # shape: (B, N, D)
+                if self.topk_selection:
+                    pred_score = self.score_predictor[p_count](spatial_x, prev_decision, self.current_sigma)  # shape: (B, K, N)
                 else:
-                    score = pred_score[:, :, 0]
+                    pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
+                if self.training:
+                    if self.topk_selection:
+                        cls_x = x[:, 0:1]
+                        # multiply transposed indicators with tokens to obtain differentiable topK selection
+                        #pred_score = pred_score[:, :, torch.randperm(pred_score.shape[-1])]
+                        spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
+                        # always keep cls token
+                        x = torch.cat((cls_x, spatial_x), dim=1)
+                        x = blk(x)
+                    else:
+                        hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
+                        self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision, dim=1)/
+                                                               hard_keep_decision.shape[1]))
+                        out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
+                        cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
+                        policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
+                        # x, self.current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
+                        x = blk(x, policy=policy)
+                        prev_decision = hard_keep_decision
+                else:
+                    if self.topk_selection:
+                        score = pred_score
+                    else:
+                        score = pred_score[:, :, 0]
                     num_keep_node = int(init_n * self.token_ratio[p_count])
                     keep_policy = torch.argsort(score, dim=1, descending=True)
-                    if not self.sorted_patch_indices:
-                        self.sorted_patch_indices.append(keep_policy.detach())
-                    else:
-                        original_inidices_sorted_by_current_scores = torch.gather(input=self.sorted_patch_indices[-1],
-                                                                                  index=keep_policy, dim=1)
-                        self.sorted_patch_indices.append(original_inidices_sorted_by_current_scores)
+                    self.sorted_patch_indices.append(keep_policy.detach())
                     keep_policy = keep_policy[:, :num_keep_node]
                     cls_policy = torch.zeros(B, 1, dtype=keep_policy.dtype, device=keep_policy.device)
                     now_policy = torch.cat([cls_policy, keep_policy + 1], dim=1)
@@ -497,16 +546,23 @@ class VisionTransformerDiffPruning(nn.Module):
                     #x = torch.gather(x, dim=1, index=now_policy.unsqueeze(-1).expand(B, N, D))
                     prev_decision = batch_index_select(prev_decision, keep_policy)  # shape: B, N, 1
                     #prev_decision = torch.gather(prev_decision, dim=1, index=keep_policy.unsqueeze(-1))[:, :num_keep_node]
+                    # x, self.current_cls_attn = blk(x, return_cls_attn=True)
                     x = blk(x)
                 p_count += 1
             else:
                 if self.training:
-                    x = blk(x, policy)
-                else:
-                    if i == len(self.blocks)-1:
-                        x, final_cls_attn = blk(x, return_cls_attn=True)  # final_cls_attn.shape = (B, H, N+1)
-                    else:
+                    if self.topk_selection:
                         x = blk(x)
+                    else:
+                        x = blk(x, policy=policy)
+                else:
+                    x = blk(x)
+            #sorted_cls_attn, sort_idx = torch.sort(self.current_cls_attn[:, :, 1:].detach().clone(), dim=-1)
+            #sorted_cls_attn /= torch.sum(sorted_cls_attn, dim=-1, keepdim=True)
+            #cumsum = torch.cumsum(sorted_cls_attn, dim=-1)
+            #th_attn = (cumsum > 0.5).float()
+            #mean_kept_token = torch.mean(th_attn, dim=-1)
+            #mean_kept_token_total = torch.mean(mean_kept_token)
 
         x = self.norm(x)
         features = x[:, 1:]
@@ -514,12 +570,14 @@ class VisionTransformerDiffPruning(nn.Module):
         x = self.pre_logits(x)
         x = self.head(x)
         if self.training:
+            if self.topk_selection:
+                return x, features
             if self.distill:
                 return x, features, prev_decision.detach(), out_pred_prob
             else:
                 return x, out_pred_prob
         else:
-            return x, final_cls_attn, now_policy
+            return x, 0, now_policy
 
 class VisionTransformerTeacher(nn.Module):
     """ Vision Transformer
@@ -551,7 +609,6 @@ class VisionTransformerTeacher(nn.Module):
         """
         super().__init__()
 
-        print('## diff vit pruning method')
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
@@ -613,7 +670,7 @@ class VisionTransformerTeacher(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, return_final_cls_attn=False):
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -624,6 +681,10 @@ class VisionTransformerTeacher(nn.Module):
 
         for i, blk in enumerate(self.blocks):
             x = blk(x)
+            # return only the CLS token attention weights from the last encoder layer
+            if return_final_cls_attn and i == len(self.blocks)-1:
+                _, final_cls_attn = blk(x, return_cls_attn=return_final_cls_attn)
+                return final_cls_attn
 
         feature = self.norm(x)
         cls = feature[:, 0]
@@ -670,10 +731,10 @@ def checkpoint_filter_fn(state_dict, model):
     return out_dict
 
 @register_model
-def dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios):
+def dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
     model = VisionTransformerDiffPruning(
             patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True
+            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True, **kwargs,
             )
     state_dict = torch.hub.load_state_dict_from_url(
         url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
