@@ -284,6 +284,58 @@ class VisionTransformer(nn.Module):
         pos_embed = pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return torch.cat((class_emb.unsqueeze(0), pos_embed), dim=1)
 
+    def forward_selfattention(self, x):
+        """
+            Pass input image through Transformer encoder layers and return the self-attention map (shape: B, H, N, N)
+            from the last layer
+        """
+        B, nc, w, h = x.shape
+        x = self.patch_embed(x)
+
+        # interpolate patch embeddings
+        dim = x.shape[-1]
+        w0 = w // self.patch_embed.patch_size
+        h0 = h // self.patch_embed.patch_size
+        class_pos_embed = self.pos_embed[:, 0]
+        if self.pos_embed.shape[1] == 198:
+            N = self.pos_embed.shape[1] - 2
+            dist_pos_embed = self.pos_embed[:, 1]
+            patch_pos_embed = self.pos_embed[:, 2:]
+        else:
+            N = self.pos_embed.shape[1] - 1
+            patch_pos_embed = self.pos_embed[:, 1:]
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
+            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+            mode='bicubic',
+        )
+        if w0 != patch_pos_embed.shape[-2]:
+            helper = torch.zeros(h0)[None, None, None, :].repeat(1, dim, w0 - patch_pos_embed.shape[-2], 1).to(x.device)
+            patch_pos_embed = torch.cat((patch_pos_embed, helper), dim=-2)
+        if h0 != patch_pos_embed.shape[-1]:
+            helper = torch.zeros(w0)[None, None, :, None].repeat(1, dim, 1, h0 - patch_pos_embed.shape[-1]).to(x.device)
+            patch_pos_embed = torch.cat((patch_pos_embed, helper), dim=-1)
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        if self.pos_embed.shape[1] == 198:
+            pos_embed = torch.cat((class_pos_embed.unsqueeze(0), dist_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+        else:
+            pos_embed = torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        if self.pos_embed.shape[1] == 198:
+            dist_token = self.dist_token.expand(B, -1, -1)
+            x = torch.cat((cls_tokens, dist_token, x), dim=1)
+        else:
+            x = torch.cat((cls_tokens, x), dim=1)
+        x = x + pos_embed
+        x = self.pos_drop(x)
+
+        for i, blk in enumerate(self.blocks):
+            if i < len(self.blocks) - 1:
+                x = blk(x)
+            else:
+                return blk(x, return_attention=True)
+
 
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
@@ -539,6 +591,12 @@ def dino_small_dist(patch_size=16, pretrained=False, **kwargs):
     model = DistilledVisionTransformer(
         patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url(
+            url="https://github.com/Muzammal-Naseer/Intriguing-Properties-of-Vision-Transformers/"
+                "releases/download/v0/deit_s_sin_dist.pth", map_location="cpu")
+        msg = model.load_state_dict(state_dict["model"], strict=False)
+        print(msg)
 
     return model
 
