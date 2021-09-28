@@ -139,12 +139,6 @@ def parse_args():
                         help='Whether to use the final layer token distillation loss')
     parser.add_argument('--cls-weight', help='Scale of the classification based on the CLS token in the dynamic ViT loss'
                                         ' function', default=1.0, type=float)
-    parser.add_argument('--attn-selection', action='store_true', default=False,
-                        help='patch importance selection based on CLS token attention weights instead of scores from'
-                             'predictor modules')
-    parser.add_argument('--attn-selection-threshold', action='store_true', default=False,
-                        help='Threshold value for weights to keep of CLS token attention weights, only used in '
-                             'combination with --attn-selection')
     parser.add_argument('--topk-selection', action='store_true', default=False,
                         help='Selection of important patches based on differentiable patch selection for image '
                              'classification paper')
