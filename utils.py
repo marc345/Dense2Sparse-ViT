@@ -66,16 +66,25 @@ def get_param_groups(model, weight_decay):
         ]
 
 
-def adjust_learning_rate(param_groups, init_lr, min_lr, step, max_step, warming_up_step=2, warmup_predictor=False, base_multi=0.1):
-    cos_lr = (math.cos(step / max_step * math.pi) + 1) * 0.5
-    cos_lr = min_lr + cos_lr * (init_lr - min_lr)
+def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_predictor=False, base_multi=0.1):
+    if args.topk_selection:
+        args.current_sigma = max(0, (1-step/args.epochs)*args.initial_sigma)
+    cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
+    cos_lr = args.min_lr + cos_lr * (args.lr - args.min_lr)
     if warmup_predictor and step < 1:
-        cos_lr = init_lr * 0.01
+        cos_lr = args.lr * 0.01
+
     if step < warming_up_step:
         backbone_lr = 0
     else:
-        backbone_lr = min(init_lr * 0.01, cos_lr)
-    print('## Using lr  %.7f for BACKBONE, cosine lr = %.7f for PREDICTOR' % (backbone_lr, cos_lr))
+        backbone_lr = min(args.lr * 0.01, cos_lr)
+
+    print(f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR', end='')
+    if args.topk_selection:
+        print(f'{args.current_sigma:.7f}')
+    else:
+        print('')
+
     for param_group in param_groups:
         if param_group['name'] == 'predictor':
             param_group['lr'] = cos_lr
@@ -88,8 +97,14 @@ def parse_args():
 
     parser.add_argument('--is-sbatch', action='store_true', default=False,
                         help='Job is started via SLURM, used to add tensorboard tracking')
-    # Hyperparameter arguments
-    parser.add_argument('--batch-size', default=16, type=int)
+    parser.add_argument('--save-path', default='test_imgs/',
+                        help='path to directory where output test images are saved to')
+    # hyperparameter arguments
+    parser.add_argument('--model-name', type=str, default='deit_small_patch16_224', help='Model Name')
+    parser.add_argument('--patch-size', default=16, help='patch size')
+    parser.add_argument('--use-shape', action='store_true', default=False,
+                        help='use the shape token of distilled dino model for saliency information instead of cls token')
+    parser.add_argument('--batch-size', default=64, type=int)
     parser.add_argument('--epochs', default=25, type=int)
     parser.add_argument('--use-dp', action='store_true', default=False,
                         help='use pytorch DataParallel for training the model with data parallelism on the GPU')
@@ -99,28 +114,7 @@ def parse_args():
     parser.add_argument('--imgnet-val-dir', type=str, default="/home/marc/Downloads/ImageNetVal2012/",
                         help='directory of imagenet2012 validation data set')
 
-    # Dynamic ViT configuration arguments
-    parser.add_argument('--pruning-locs', nargs='+', help='Locations of the prediction modules in the encoder layer',
-                        default=[3, 6, 9], type=int)
-    parser.add_argument('--keep-ratios', nargs='+', help='Keeping ratios of the prediction modules', type=float,
-                        default=[0.75, 0.5, 0.25])
-    parser.add_argument('--ratio-weight', help='Scale of the kept token ratio in the dynamic ViT loss function',
-                         default=2.0, type=float)
-    parser.add_argument('--dist-weight', help='Scale of the distillation party in the dynamic ViT loss function',
-                        default=0.5, type=float)
-    parser.add_argument('--cls-weight', help='Scale of the classifcation based on the CLS token in the dynamic ViT loss '
-                                             'function', default=1.0, type=float)
-
-    parser.add_argument('--model-name', type=str, default='deit_small_patch16_224', help='Model Name')
-    parser.add_argument('--patch-size', default=16, help='patch size')
-    parser.add_argument('--use-shape', action='store_true', default=False,
-                        help='use the shape token of distilled dino model for saliency information instead of cls token')
-    parser.add_argument('--save-path', default='test_imgs',
-                        help='path to directory where output test images are saved to')
-    parser.add_argument('--predictor-layer', default=9,
-                        help='number of the encoder layer before which the patch keep predictiont takes place')
-    parser.add_argument('--keep-ratio', default=0.3,
-                        help='amount of tokens to keep')
+    # optimizer args
     parser.add_argument('--weight-decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
     parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
@@ -129,5 +123,33 @@ def parse_args():
                         help='warmup learning rate (default: 1e-6)')
     parser.add_argument('--min-lr', type=float, default=1e-5, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+
+    # Dynamic ViT configuration arguments
+    parser.add_argument('--pruning-locs', nargs='+', help='Locations of the prediction modules in the encoder layer',
+                        default=[9], type=int)
+    parser.add_argument('--keep-ratios', nargs='+', help='Keeping ratios of the prediction modules', type=float,
+                        default=[0.35])
+    parser.add_argument('--use-ratio-loss', action='store_true', default=False,
+                        help='Whether to use the kept token ratio loss')
+    parser.add_argument('--ratio-weight', help='Scale of the kept token ratio in the dynamic ViT loss function',
+                         default=2.0, type=float)
+    parser.add_argument('--dist-weight', help='Scale of the distillation party in the dynamic ViT loss function',
+                        default=0.5, type=float)
+    parser.add_argument('--use-token-dist-loss', action='store_true', default=False,
+                        help='Whether to use the final layer token distillation loss')
+    parser.add_argument('--cls-weight', help='Scale of the classification based on the CLS token in the dynamic ViT loss'
+                                        ' function', default=1.0, type=float)
+    parser.add_argument('--attn-selection', action='store_true', default=False,
+                        help='patch importance selection based on CLS token attention weights instead of scores from'
+                             'predictor modules')
+    parser.add_argument('--attn-selection-threshold', action='store_true', default=False,
+                        help='Threshold value for weights to keep of CLS token attention weights, only used in '
+                             'combination with --attn-selection')
+    parser.add_argument('--topk-selection', action='store_true', default=False,
+                        help='Selection of important patches based on differentiable patch selection for image '
+                             'classification paper')
+    parser.add_argument('--initial-sigma',
+                        help='Inital value of sigma for the perturbation noise of the differential top-k module',
+                        default=0.05, type=float)
 
     return parser.parse_args()
