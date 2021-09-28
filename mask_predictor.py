@@ -90,7 +90,7 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
         print('Epoch {}/{}'.format(epoch+1, args.epochs))
         print('-' * 50)
 
-        for phase in ['train', 'val']:
+        for phase in ['val']:
 
             if phase == 'train':
                 warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
@@ -137,7 +137,7 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                         optimizer.step()
                         preds = torch.argmax(output[0].detach(), dim=1)
                     else:
-                        output, final_cls_attn, final_policy = output
+                        output, final_policy = output
                         loss = F.cross_entropy(output, labels)
                         preds = torch.argmax(output.detach(), dim=1)
 
@@ -153,7 +153,8 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                     else:
                         running_keeping_ratio += getattr(model, "num_kept_tokens")[-1]
                 else:
-                    running_keeping_ratio += getattr(model, "token_ratio")[-1]
+                    pass
+                    #running_keeping_ratio += getattr(model, "token_ratio")[-1]
 
             #if phase == 'train':
             #    scheduler.step(epoch)
@@ -181,6 +182,7 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                     writer.add_scalar(f'{phase}_metrics/kept_token_ratio', epoch_keep_ratio, epoch)
 
         with torch.no_grad():
+            continue
             model.eval()
             test_outs, final_cls_attn, final_policy = model(mask_test_imgs.clone())
             test_preds = torch.argmax(test_outs, dim=1)
@@ -287,6 +289,8 @@ if __name__ == '__main__':
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
 
+        args.epochs = 1
+
     if args.use_ddp:
         print(f'Using distributed data parallel training on {args.world_size} GPUs')
         mp.spawn(train_model_ddp, args=(args,), nprocs=args.world_size)
@@ -305,8 +309,12 @@ if __name__ == '__main__':
             writer = SummaryWriter(log_dir=f'runs/{args.job_name}')
 
         # get the model specified as argument
-        student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection)
+        # student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
+        #                                                 topk_selection=args.topk_selection)
+        student = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
+        student.eval()
+        for param in student.parameters():
+            param.requires_grad = False
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()
