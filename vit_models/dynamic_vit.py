@@ -377,8 +377,7 @@ class VisionTransformerDiffPruning(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
-                 topk_selection=False):
+                 pruning_loc=None, token_ratio=None, distill=False, topk_selection=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -451,8 +450,6 @@ class VisionTransformerDiffPruning(nn.Module):
         # the number of kept tokens during training at each prediction module
         self.num_kept_tokens = []
 
-        self.attn_selection = attn_selection
-        self.attn_selection_threshold = attn_selection_threshold
         self.cls_attn = []
 
         self.topk_selection = topk_selection
