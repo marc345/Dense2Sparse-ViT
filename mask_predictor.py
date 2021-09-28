@@ -263,7 +263,12 @@ if __name__ == '__main__':
 
     if args.is_sbatch:
         args.job_id = os.environ["SLURM_JOBID"]
-        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor/'
+        if args.attn_selection and args.topk_selection:
+            args.patch_selection_method = 'differentiable_topk_cls_attn_weights/'
+        elif args.topk_selection:
+            args.patch_selection_method = 'differentiable_topk_predictor/'
+        else:
+            args.patch_selection_method = 'gumbel_softmax_predictor/'
         if not args.topk_selection:
             if args.use_ratio_loss and args.use_token_dist_loss:
                 args.patch_selection_method += 'with_kept_token_ratio_and_kept_token_kl_loss/'
@@ -283,9 +288,10 @@ if __name__ == '__main__':
         args.batch_size = 16
         args.epochs = 10
 
-        args.topk_selection = False
-        args.use_ratio_loss = True
-        args.use_token_dist_loss = True
+        args.pruning_locs = [2]
+        args.keep_ratios = [0.3]
+
+        args.topk_selection = True
 
     if args.use_ddp:
         print(f'Using distributed data parallel training on {args.world_size} GPUs')

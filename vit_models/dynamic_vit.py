@@ -348,19 +348,23 @@ class PredictorLG(nn.Module):
 
 
     def forward(self, x, policy, current_sigma=0.05):
-        x = self.in_conv(x)
-        B, N, C = x.size()
-        local_x = x[:,:, :C//2]
-        global_x = (x[:,:, C//2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
-        x = torch.cat([local_x, global_x.expand(B, N, C//2)], dim=-1)
 
         if self.topk_selection:
-            x = self.out_conv(x).squeeze(-1)
+            # x = self.out_conv(x).squeeze(-1)
+            B, N = x.shape
+            # normalize again after attention weight for CLS token itself was excluded
+            x /= torch.sum(x, dim=-1, keepdim=True)
             if self.training:
                 return self.topk(x, current_sigma=current_sigma)
             else:
                 return x
         else:
+            x = self.in_conv(x)
+            B, N, C = x.size()
+            local_x = x[:, :, :C // 2]
+            global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
+            x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
+
             return self.out_conv(x)
 
 
@@ -509,7 +513,9 @@ class VisionTransformerDiffPruning(nn.Module):
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
                 if self.topk_selection:
-                    pred_score = self.score_predictor[p_count](spatial_x, prev_decision, self.current_sigma)  # shape: (B, K, N)
+                    # pred_score = self.score_predictor[p_count](spatial_x, prev_decision, self.current_sigma)  # shape: (B, K, N)
+                    mean_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                    pred_score = self.score_predictor[p_count](mean_cls_attn, prev_decision, self.current_sigma)  # shape: (B, K, N)
                 else:
                     pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
                 if self.training:
@@ -549,6 +555,8 @@ class VisionTransformerDiffPruning(nn.Module):
                     # x, self.current_cls_attn = blk(x, return_cls_attn=True)
                     x = blk(x)
                 p_count += 1
+            elif i in [loc-1 for loc in self.pruning_loc]:
+                x, current_cls_attn = blk(x, return_cls_attn=True)
             else:
                 if self.training:
                     if self.topk_selection:

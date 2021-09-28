@@ -79,7 +79,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     else:
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
-    print(f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR', end='')
+    print(f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR ', end='')
     if args.topk_selection:
         print(f'{args.current_sigma:.7f}')
     else:
@@ -151,5 +151,10 @@ def parse_args():
     parser.add_argument('--initial-sigma',
                         help='Inital value of sigma for the perturbation noise of the differential top-k module',
                         default=0.05, type=float)
+    parser.add_argument('--attn-selection', action='store_true', default=False,
+                        help='Whether the CLS token attention weights should be used for the patch importance decision,'
+                             'only in combination with --topk-selection (otherwise the predictor network will be used).'
+                             'Earliest possible pruning stage is at layer 1, since CLS token attention weights are '
+                             'needed.')
 
     return parser.parse_args()
