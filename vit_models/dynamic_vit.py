@@ -377,7 +377,7 @@ class VisionTransformerDiffPruning(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 pruning_loc=None, token_ratio=None, distill=False, topk_selection=False):
+                 pruning_loc=None, token_ratio=None, distill=False, topk_selection=False, attn_selection=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -454,6 +454,7 @@ class VisionTransformerDiffPruning(nn.Module):
 
         self.topk_selection = topk_selection
         if self.topk_selection:
+            self.attn_selection = attn_selection
             self.current_sigma = 0.05
         ################################################################################################################
 
@@ -510,9 +511,14 @@ class VisionTransformerDiffPruning(nn.Module):
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
                 if self.topk_selection:
-                    # pred_score = self.score_predictor[p_count](spatial_x, prev_decision, self.current_sigma)  # shape: (B, K, N)
-                    mean_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
-                    pred_score = self.score_predictor[p_count](mean_cls_attn, prev_decision, self.current_sigma)  # shape: (B, K, N)
+                    if self.attn_selection:
+                        mean_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                        #max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
+                        pred_score = self.score_predictor[p_count](mean_cls_attn,
+                                                                   prev_decision, self.current_sigma)  # (B, K, N)
+                    else:
+                        pred_score = self.score_predictor[p_count](spatial_x, prev_decision,
+                                                                   self.current_sigma)  # shape: (B, K, N)
                 else:
                     pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
                 if self.training:
@@ -552,7 +558,9 @@ class VisionTransformerDiffPruning(nn.Module):
                     # x, self.current_cls_attn = blk(x, return_cls_attn=True)
                     x = blk(x)
                 p_count += 1
-            elif i in [loc-1 for loc in self.pruning_loc]:
+            # save the CLS token attention weights from the layer before the pruning stage when selecting patches
+            # based on top-k CLS attention weights
+            elif (self.topk_selection and self.attn_selection) and i in [loc-1 for loc in self.pruning_loc]:
                 x, current_cls_attn = blk(x, return_cls_attn=True)
             else:
                 if self.training:
