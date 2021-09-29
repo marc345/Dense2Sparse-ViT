@@ -312,7 +312,8 @@ if __name__ == '__main__':
 
         # get the model specified as argument
         student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection)
+                                                        topk_selection=args.topk_selection,
+                                                        attn_selection=args.attn_selection)
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()
