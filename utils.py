@@ -81,7 +81,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
 
     print(f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR ', end='')
     if args.topk_selection:
-        print(f'{args.current_sigma:.7f}')
+        print(f'sigma for {args.current_sigma:.7f} TOP-K')
     else:
         print('')
 
