@@ -145,5 +145,10 @@ def parse_args():
     parser.add_argument('--initial-sigma',
                         help='Inital value of sigma for the perturbation noise of the differential top-k module',
                         default=0.05, type=float)
+    parser.add_argument('--attn-selection', action='store_true', default=False,
+                        help='Whether the CLS token attention weights should be used for the patch importance decision,'
+                             'only in combination with --topk-selection (otherwise the predictor network will be used).'
+                             'Earliest possible pruning stage is at layer 1, since CLS token attention weights are '
+                             'needed.')
 
     return parser.parse_args()
