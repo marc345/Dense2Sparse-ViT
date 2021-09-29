@@ -276,7 +276,7 @@ if __name__ == '__main__':
                         f'pruning_locs_{"_".join([str(loc) for loc in args.pruning_locs])}_keep_ratios_' \
                         f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
                         f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
-                        f'{"ratio_"+args.ratio_weight+"_" if args.use_ratio_loss and not args.topk_selection else ""}_' \
+                        f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
                         f'{args.job_id}'
     else:
         args.job_name = 'debug_job'
