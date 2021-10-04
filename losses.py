@@ -8,8 +8,8 @@ class DistillDiffPruningLoss(torch.nn.Module):
     """
 
     def __init__(self, args, teacher_model, base_criterion: torch.nn.Module, ratio_weight=2.0, distill_weight=0.5,
-                 dynamic=False, pruning_loc=[3], keep_ratio=[0.3], clf_weight=1.0, mse_token=False,
-                 print_mode=True):
+                 dynamic=False, pruning_loc=[3], keep_ratio=[0.3], clf_weight=1.0, mse_token=False, softmax_temp=1.0,
+                 print_mode=True, early_exit=False):
         super().__init__()
         self.teacher_model = teacher_model
         self.base_criterion = base_criterion
@@ -22,6 +22,8 @@ class DistillDiffPruningLoss(torch.nn.Module):
         self.ratio_loss = 0
         self.cls_distill_loss = 0
         self.token_distill_loss = 0
+        self.early_exit_cls_loss = 0
+        self.early_exit_cls_distill_loss = 0
         self.mse_token = mse_token
         self.dynamic = dynamic
 
@@ -32,7 +34,12 @@ class DistillDiffPruningLoss(torch.nn.Module):
         self.use_ratio_loss = args.use_ratio_loss
         self.use_token_dist_loss = args.use_token_dist_loss
 
-        print('cls_weight=', clf_weight, 'distill_weight=', distill_weight)
+        # temperature value used for distillation loss parts
+        self.T = softmax_temp
+
+        self.early_exit = early_exit
+
+        print('cls_weight=', clf_weight, 'distill_weight=', distill_weight, 'softmax_temp=', softmax_temp)
         if not self.topk_selection and self.use_token_dist_loss:
             print('using KL divergence of final layer tokens in loss function (weight: see distill_weight above')
         if not self.topk_selection and self.use_ratio_loss:
@@ -57,10 +64,11 @@ class DistillDiffPruningLoss(torch.nn.Module):
         if self.topk_selection:
             # class probabilities, final layer tokens (without CLS), indices of kept input data
             pred, token_pred = outputs
-        else:
+        elif self.early_exit:
             # predictions, final layer tokens (without CLS), final token keep decisions, all token keep decisions
+            pred, early_exit_pred, token_pred, mask, out_pred_score = outputs
+        else:
             pred, token_pred, mask, out_pred_score = outputs
-
 
         # crossentropy loss between student predictions and ground truth labels
         cls_loss = self.base_criterion(pred, labels)
@@ -70,11 +78,24 @@ class DistillDiffPruningLoss(torch.nn.Module):
 
         # KL divergence between student class probabilities and teacher class probabilities
         cls_kl_loss = F.kl_div(
-            F.log_softmax(pred, dim=-1),
-            F.log_softmax(cls_t, dim=-1),
+            F.log_softmax(pred/self.T, dim=-1),
+            F.log_softmax(cls_t/self.T, dim=-1),
             reduction='batchmean',
             log_target=True
-        )
+        ) * (self.T ** 2)
+
+        # early exit losses computed from CLS token predictions of student network in the layer before the pruning stage
+        if self.early_exit:
+            # cross entropy loss between student early exit predictions from cls token and ground truth labels
+            early_exit_cls_loss = self.base_criterion(early_exit_pred, labels)
+
+            # KL divergence between early exit student class probabilities and teacher class probabilities
+            early_exit_cls_distill_loss = F.kl_div(
+                F.log_softmax(early_exit_pred/self.T, dim=-1),
+                F.log_softmax(cls_t/self.T, dim=-1),
+                reduction='batchmean',
+                log_target=True
+            ) * (self.T ** 2)
 
         if self.topk_selection:
             #token_kl_loss = F.kl_div(
@@ -122,6 +143,8 @@ class DistillDiffPruningLoss(torch.nn.Module):
 
             # print(cls_loss, pred_loss)
             loss = self.clf_weight * cls_loss + self.distill_weight * cls_kl_loss
+            if self.early_exit:
+                loss += early_exit_cls_loss + early_exit_cls_distill_loss
             if self.use_ratio_loss:
                 loss += self.ratio_weight * pred_loss / len(self.pruning_loc)
             if self.use_token_dist_loss:
@@ -130,10 +153,16 @@ class DistillDiffPruningLoss(torch.nn.Module):
         if self.print_mode:
             self.cls_loss += cls_loss.detach().item()
             self.cls_distill_loss += cls_kl_loss.detach().item()
+
+            if self.early_exit:
+                self.early_exit_cls_loss += early_exit_cls_loss.detach().item()
+                self.early_exit_cls_distill_loss += early_exit_cls_distill_loss.detach().item()
+
             if not self.topk_selection and self.use_ratio_loss:
                 self.ratio_loss += pred_loss.detach().item()
             if not self.topk_selection and self.use_token_dist_loss:
                 self.token_distill_loss += token_kl_loss.detach().item()
+
             self.count += 1
             if self.count % 100 == 1:
                 if self.topk_selection:
@@ -142,6 +171,9 @@ class DistillDiffPruningLoss(torch.nn.Module):
                 else:
                     loss_info = f'loss info: cls_loss={(self.cls_loss / self.count):.4f},   ' \
                                 f'cls_kl={(self.cls_distill_loss / self.count):.4f}'
+                    if self.early_exit:
+                        loss_info += f'   ee_cls_loss={(self.early_exit_cls_loss / self.count):.4f},    ' \
+                                     f'ee_cls_kl={(self.early_exit_cls_distill_loss / self.count):.4f}'
                     if self.use_ratio_loss:
                         loss_info += f',   ratio loss={(self.ratio_loss/self.count):.4f}'
                     if self.use_token_dist_loss:
