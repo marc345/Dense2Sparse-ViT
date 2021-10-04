@@ -24,6 +24,7 @@ from timm.utils import NativeScaler
 import losses
 import random
 import json
+import wandb
 
 import utils
 import attention_segmentation
@@ -55,8 +56,7 @@ data_transforms = {
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ]),
     'val': transforms.Compose([
-        #transforms.Resize(256),
-        transforms.Resize(224),
+        transforms.Resize(256),
         transforms.CenterCrop(224),
         transforms.ToTensor()
     ]),
@@ -103,6 +103,8 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
             running_loss = 0.0
             running_acc = 0.0
             running_keeping_ratio = 0.0
+            running_ee_loss = 0.0
+            running_ee_acc = 0.0
 
             model.train(mode=(phase == 'train'))
 
@@ -111,16 +113,15 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                 inputs = data[0].to(args.device)
                 labels = data[1].to(args.device)
 
-                # zero the parameter gradients
-                optimizer.zero_grad()
-
                 # forward
                 with torch.set_grad_enabled(phase == 'train'):
                     #with torch.cuda.amp.autocast():
-                    output = model(inputs.clone())
+                    outputs = model(inputs.clone())
                     if phase == 'train':
+                        # zero the parameter gradients
+                        optimizer.zero_grad()
                         #with torch.cuda.amp.autocast():
-                        loss = criterion(inputs, output, labels)
+                        loss = criterion(inputs, outputs, labels)
                         ## this attribute is added by timm on one optimizer (adahessian)
                         #is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
                         #loss_scaler(loss, optimizer, clip_grad=max_norm,
@@ -135,16 +136,27 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                         #for param in predictor_params:
                         #    predictor_grads.append(param.grad)
                         optimizer.step()
-                        preds = torch.argmax(output[0].detach(), dim=1)
+                        preds = torch.argmax(outputs[0].detach(), dim=1)
+                        if args.early_exit:
+                            ee_preds = torch.argmax(outputs[1].detach(), dim=1)
                     else:
-                        output, final_cls_attn, final_policy = output
-                        loss = F.cross_entropy(output, labels)
-                        preds = torch.argmax(output.detach(), dim=1)
+                        if args.early_exit:
+                            logits, ee_logits, _, final_policy = outputs
+                            ee_preds = torch.argmax(ee_logits.detach(), dim=1)
+                            ee_loss = F.cross_entropy(ee_logits, labels)
+                            loss = F.cross_entropy(logits, labels) + ee_loss
+                        else:
+                            logits, _, final_policy = outputs
+                            loss = F.cross_entropy(logits, labels)
+                        preds = torch.argmax(logits.detach(), dim=1)
 
 
                 # statistics
                 running_loss += loss.detach().item()
                 running_acc += torch.sum(preds == labels.data)/labels.shape[0]
+                if args.early_exit:
+                    running_ee_acc += torch.sum(ee_preds == labels.data)/labels.shape[0]
+                    # print(f'{phase} current ee_acc: {torch.sum(ee_preds == labels.data) / labels.shape[0]:.4f}')
                 #for i, decision in enumerate(getattr(model, "decisions")):
                 if phase == 'train':
                     # mean token keeping ratio across batch
@@ -160,30 +172,43 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
 
             epoch_loss = running_loss / len(data_loaders[phase]) #batch_repeat_factor
             epoch_acc = float(running_acc) / (len(data_loaders[phase])) #batch_repeat_factor
+            if args.early_exit:
+                # ee_epoch_loss = running_ee_loss / len(data_loaders[phase])
+                ee_epoch_acc = float(running_ee_acc) / (len(data_loaders[phase]))
             if epoch_acc > best_acc:
                 best_acc = epoch_acc
             args.epoch_acc = epoch_acc
             epoch_keep_ratio = running_keeping_ratio / len(data_loaders[phase]) #batch_repeat_factor
             print(f'{phase} loss: {epoch_loss:.4f}, acc: {epoch_acc:.4f}, kept token ratio: {epoch_keep_ratio:.4f}')
+            if args.early_exit:
+                print(f'{phase}: early exit acc: {ee_epoch_acc:.4f}')
 
-            if args.is_sbatch:
-                # Tensorboard tracking
-                writer.add_scalar(f'{phase}_metrics/total_acc', epoch_acc, epoch)
-                writer.add_scalar(f'{phase}_metrics/total_loss', epoch_loss, epoch)
-                writer.add_scalar(f'{phase}_metrics/cls_loss', criterion.cls_loss/criterion.count, epoch)
-                writer.add_scalar(f'{phase}_metrics/cls_dist_loss', criterion.cls_distill_loss/criterion.count, epoch)
-                if not args.topk_selection and args.use_ratio_loss:
-                    writer.add_scalar(f'{phase}_metrics/ratio_loss', criterion.ratio_loss/criterion.count, epoch)
-                if not args.topk_selection and args.use_token_dist_loss:
-                    writer.add_scalar(f'{phase}_metrics/token_distill_loss',
-                                      criterion.token_distill_loss/criterion.count, epoch)
-                if not args.topk_selection:
-                    writer.add_scalar(f'{phase}_metrics/kept_token_ratio', epoch_keep_ratio, epoch)
+            if args.is_sbatch and args.wandb:
+                # wandb.ai logging
+                wandb.log({f'{phase} total_loss': epoch_loss, f'{phase} total_acc': epoch_acc})
+                if args.early_exit:
+                    wandb.log({f'{phase} early exit acc', ee_epoch_acc})
+                if phase == 'train':
+                    wandb.log({'cls_loss': criterion.cls_loss/criterion.count})
+                    wandb.log({'cls_dist_loss': criterion.cls_distill_loss/criterion.count})
+                    if args.early_exit:
+                        wandb.log({'early_exit_cls_loss', criterion.early_exit_cls_loss / criterion.count})
+                        wandb.log({'early_exit_cls_dist_loss', criterion.early_exit_cls_distill_loss / criterion.count})
+                    if not args.topk_selection and args.use_ratio_loss:
+                        wandb.log({'ratio_loss': criterion.ratio_loss/criterion.count})
+                    if not args.topk_selection and args.use_token_dist_loss:
+                        wandb.log({'token_distill_loss': criterion.token_distill_loss/criterion.count})
+                    if not args.topk_selection:
+                        wandb.log({'kept_token_ratio': epoch_keep_ratio})
 
         with torch.no_grad():
             model.eval()
-            test_outs, final_cls_attn, final_policy = model(mask_test_imgs.clone())
-            test_preds = torch.argmax(test_outs, dim=1)
+            test_logits, _, final_cls_attn, final_policy = model(mask_test_imgs.clone())
+            final_cls_attn = final_cls_attn.detach()
+            test_preds = torch.argmax(test_logits, dim=1)
+
+            patch_keep_prob = torch.exp(getattr(model, 'current_score')[:, :, 0])
+
             # list that holds the original patch indices (based on initial, unpruned tokens sequence) sorted in
             # descending order based on the prediction scores of the respective prediction module (length of list is
             # equal to the number of prediction modules)
@@ -200,28 +225,6 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
             dropped_token_idx = torch.cat(dropped_token_idx, dim=1)
             token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
 
-            #args.is_dist = True
-            #args.use_shape = True
-            #args.threshold = 0.5
-            #attn_segmentation_mask = attention_segmentation.get_attention_masks(args, mask_test_imgs.clone(), dino)
-            #attn_segmentation_mask = attn_segmentation_mask[:, 1] #torch.max(attn_segmentation_mask, dim=1)[0]
-            #teacher_cls_attn = teacher_model(mask_test_imgs.clone(), return_final_cls_attn=True)
-            #teacher_cls_attn = torch.mean(teacher_cls_attn, dim=1)[:, 1:]  # shape: B, N-1
-            #teacher_cls_attn /= torch.sum(teacher_cls_attn, dim=1, keepdim=True)  # renormalize after dropping CLS token
-            #sorted_attn, sort_idx = torch.sort(teacher_cls_attn, dim=1)
-            #cumsum = torch.cumsum(sorted_attn, dim=1)
-            #thresholded_attn = (cumsum > 0.1).float()
-            #thresholded_attn = torch.cat((thresholded_attn, torch.zeros_like(dropped_token_idx)), dim=1)
-            #attn_segmentation_mask = torch.empty_like(teacher_cls_attn)
-            #attn_segmentation_mask.scatter_(dim=1, index=sort_idx, src=thresholded_attn)
-            #num_patches = attn_segmentation_mask.shape[1]
-            #patches_per_image_dim = int(np.sqrt(num_patches))
-            #patch_size = int(mask_test_imgs.shape[-1] // np.sqrt(num_patches))
-            #attn_segmentation_mask = attn_segmentation_mask.reshape(attn_segmentation_mask.shape[0], 1,
-            #                                                        patches_per_image_dim, patches_per_image_dim)
-            #attn_segmentation_mask = F.interpolate(attn_segmentation_mask, scale_factor=patch_size, mode="nearest")\
-            #    .squeeze(1)
-
             keep_mask = torch.ones_like(kept_token_idx)
             drop_mask = torch.zeros_like(dropped_token_idx)
             sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
@@ -230,8 +233,11 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
             # only display result after last predictor stage
             attention_segmentation.display_patch_drop(mask_test_imgs.cpu(), patch_drop_mask.cpu(), args, epoch,
                                                       (test_preds == mask_test_labels).cpu().numpy(),
-                                                      patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()])
-            #final_cls_attn=torch.max(final_cls_attn[:, :, 1:], dim=1)[0].cpu(),
+                                                      patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
+                                                      patch_scores=patch_keep_prob.cpu())
+            # attention_segmentation.visualize_heads(mask_test_imgs.cpu(), args, epoch,
+            #                                        [kept_token_idx.cpu(), dropped_token_idx.cpu()],
+            #                                        final_cls_attn=final_cls_attn.cpu())
 
     time_elapsed = time.time() - since
     print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
@@ -243,9 +249,7 @@ if __name__ == '__main__':
 
     args = utils.parse_args()
     args_dict = vars(args)
-
     args.save_path += 'mask_predictor/'
-
     args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     #data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
@@ -262,6 +266,7 @@ if __name__ == '__main__':
     training_start = time.time()
 
     if args.is_sbatch:
+        args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
         args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor/'
         if not args.topk_selection:
@@ -279,13 +284,26 @@ if __name__ == '__main__':
                         f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
                         f'{args.job_id}'
     else:
+        # check if debug job on biwidl machine
+        if os.environ['USER'] == 'segerm':
+            data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
         args.job_name = 'debug_job'
-        args.batch_size = 16
+        args.batch_size = 64
         args.epochs = 10
 
         args.topk_selection = False
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
+
+        args.early_exit = True
+
+    wandb.init(
+        project="Dense2Sparse-ViT",
+        # notes="tweak baseline",
+        # tags=["baseline", "paper1"],
+        # config=config,
+    )
+    wandb.config.update(args)
 
     if args.use_ddp:
         print(f'Using distributed data parallel training on {args.world_size} GPUs')
@@ -301,12 +319,11 @@ if __name__ == '__main__':
                 print('\n     ', end='')
             print(f'{key}: {args_dict[key]}', end=',      ')
         print('\n')
-        if args.is_sbatch:
-            writer = SummaryWriter(log_dir=f'runs/{args.job_name}')
 
         # get the model specified as argument
         student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection)
+                                                        topk_selection=args.topk_selection, early_exit=args.early_exit)
+        parameter_group = utils.get_param_groups(student, args)
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()
@@ -318,15 +335,14 @@ if __name__ == '__main__':
         #for param in dino_model.parameters():
         #    param.requires_grad = False
 
-        parameter_group = utils.get_param_groups(student, args.weight_decay)
-
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
         optimizer = torch.optim.AdamW(parameter_group, **opt_args)
 
         criterion = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
                                                   ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
                                                   pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
-                                                  base_criterion=torch.nn.CrossEntropyLoss())
+                                                  base_criterion=torch.nn.CrossEntropyLoss(),
+                                                  softmax_temp=args.softmax_temp, early_exit=args.early_exit)
 
         #cosine_lr_scheduler = CosineLRScheduler(optimizer, t_initial=30, lr_min=1e-5, decay_rate=0.1, warmup_t=5,
         #                                        warmup_lr_init=1e-6)

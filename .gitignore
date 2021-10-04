@@ -2,6 +2,7 @@ test_imgs/
 sbatch_log/
 runs/
 slurm_run.sh
+wandb/
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template
