@@ -44,13 +44,16 @@ def get_model(args, pretrained=True):
 
     return model
 
-def get_param_groups(model, weight_decay):
+def get_param_groups(model, args):
     decay = []
     no_decay = []
     predictor = []
+    early_exit = []
     for name, param in model.named_parameters():
         if 'predictor' in name:
             predictor.append(param)
+        elif 'early_exit' in name:
+            early_exit.append(param)
         elif not param.requires_grad:
             continue  # frozen weights
         elif 'cls_token' in name or 'pos_embed' in name:
@@ -60,9 +63,10 @@ def get_param_groups(model, weight_decay):
         else:
             decay.append(param)
     return [
-        {'params': predictor, 'weight_decay': weight_decay, 'name': 'predictor'},
-        {'params': no_decay, 'weight_decay': 0., 'name': 'base_no_decay'},
-        {'params': decay, 'weight_decay': weight_decay, 'name': 'base_decay'}
+            {'params': predictor, 'weight_decay': args.weight_decay, 'name': 'predictor'},
+            {'params': no_decay, 'weight_decay': 0., 'name': 'base_no_decay'},
+            {'params': decay, 'weight_decay': args.weight_decay, 'name': 'base_decay'},
+            {'params': early_exit, 'weight_decay': args.weight_decay, 'name': 'early_exit'}
         ]
 
 
@@ -71,23 +75,28 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
         args.current_sigma = max(0, (1-step/args.epochs)*args.initial_sigma)
     cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
     cos_lr = args.min_lr + cos_lr * (args.lr - args.min_lr)
+    if args.early_exit:
+        early_exit_head_lr = cos_lr * 100
     if warmup_predictor and step < 1:
         cos_lr = args.lr * 0.01
-
     if step < warming_up_step:
         backbone_lr = 0
     else:
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
-    print(f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR', end='')
+    lr_info = f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR'
     if args.topk_selection:
-        print(f'{args.current_sigma:.7f}')
-    else:
-        print('')
+        lr_info += f', current sigma = {args.current_sigma:.7f} for TOP-K'
+    if args.early_exit:
+        lr_info += f', ee_head_lr = {early_exit_head_lr:.7f} for EARLY EXIT'
+    print(lr_info)
+
 
     for param_group in param_groups:
         if param_group['name'] == 'predictor':
             param_group['lr'] = cos_lr
+        elif args.early_exit and param_group['name'] == 'early_exit':
+            param_group['lr'] = early_exit_head_lr
         else:
             param_group['lr'] = backbone_lr  # init_lr * 0.01 # cos_lr * base_multi
 
@@ -97,6 +106,9 @@ def parse_args():
 
     parser.add_argument('--is-sbatch', action='store_true', default=False,
                         help='Job is started via SLURM, used to add tensorboard tracking')
+    parser.add_argument('--wandb', action='store_true', default=False,
+                        help='Whether to track metrics like accuracy and loss via wandb.ai, creates a folder for the'
+                             'job in the wandb directory')
     parser.add_argument('--save-path', default='test_imgs/',
                         help='path to directory where output test images are saved to')
     # hyperparameter arguments
@@ -125,10 +137,16 @@ def parse_args():
                         help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
 
     # Dynamic ViT configuration arguments
+    parser.add_argument('--early-exit', action='store_true', default=False,
+                        help='Whether to use the CLS token of the layer before the pruning stage to compute an '
+                             'additional early exit loss term from the output of an early exit classifier head')
     parser.add_argument('--pruning-locs', nargs='+', help='Locations of the prediction modules in the encoder layer',
-                        default=[9], type=int)
+                        default=[3], type=int)
     parser.add_argument('--keep-ratios', nargs='+', help='Keeping ratios of the prediction modules', type=float,
                         default=[0.35])
+    parser.add_argument('--softmax-temp',
+                        help='Temperature value used for the softmax functions in the distillation loss parts',
+                        default=1.0, type=float)
     parser.add_argument('--use-ratio-loss', action='store_true', default=False,
                         help='Whether to use the kept token ratio loss')
     parser.add_argument('--ratio-weight', help='Scale of the kept token ratio in the dynamic ViT loss function',
