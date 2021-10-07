@@ -110,6 +110,8 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
 
             for i, data in enumerate(tqdm(data_loaders[phase])):
 
+                step_log = {}
+
                 inputs = data[0].to(args.device)
                 labels = data[1].to(args.device)
 
@@ -185,21 +187,26 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
 
             if args.is_sbatch and args.wandb:
                 # wandb.ai logging
-                wandb.log({f'{phase} total_loss': epoch_loss, f'{phase} total_acc': epoch_acc})
+                step_log[f'{phase} total_loss'] = epoch_loss
+                step_log[f'{phase} total_acc'] = epoch_acc
                 if args.early_exit:
-                    wandb.log({f'{phase} early exit acc', ee_epoch_acc})
+                    step_log[f'{phase} early exit acc'] = ee_epoch_acc
                 if phase == 'train':
-                    wandb.log({'cls_loss': criterion.cls_loss/criterion.count})
-                    wandb.log({'cls_dist_loss': criterion.cls_distill_loss/criterion.count})
+                    step_log['cls_loss'] = criterion.cls_loss/criterion.count
+                    step_log['cls_dist_loss'] = criterion.cls_distill_loss/criterion.count
                     if args.early_exit:
-                        wandb.log({'early_exit_cls_loss', criterion.early_exit_cls_loss / criterion.count})
-                        wandb.log({'early_exit_cls_dist_loss', criterion.early_exit_cls_distill_loss / criterion.count})
+                        step_log['early_exit_cls_loss'] = criterion.early_exit_cls_loss / criterion.count
+                        step_log['early_exit_cls_dist_loss'] = criterion.early_exit_cls_distill_loss / criterion.count
                     if not args.topk_selection and args.use_ratio_loss:
-                        wandb.log({'ratio_loss': criterion.ratio_loss/criterion.count})
+                        step_log['ratio_loss'] = criterion.ratio_loss/criterion.count
                     if not args.topk_selection and args.use_token_dist_loss:
-                        wandb.log({'token_distill_loss': criterion.token_distill_loss/criterion.count})
+                        step_log['token_distill_loss'] = criterion.token_distill_loss/criterion.count
                     if not args.topk_selection:
-                        wandb.log({'kept_token_ratio': epoch_keep_ratio})
+                        step_log['kept_token_ratio'] = epoch_keep_ratio
+
+        if args.is_sbatch and args.wandb:
+            # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
+            wandb.log(step_log)
 
         with torch.no_grad():
             model.eval()
@@ -283,6 +290,18 @@ if __name__ == '__main__':
                         f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
                         f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
                         f'{args.job_id}'
+        wandb_job_name = f'{os.environ["WANDB_NAME"] + " " if os.environ.get("WANDB_NAME") is not None else ""}' \
+                         f'{args.job_name} {str(args.job_id)}'
+
+        wandb.init(
+            project="Dense2Sparse-ViT",
+            name=wandb_job_name,
+            # notes="tweak baseline",
+            # tags=["baseline", "paper1"],
+            # config=config,
+        )
+        wandb.config.update(args)
+        print(f'JOB DESCRIPTION: {wandb.run.notes}')
     else:
         # check if debug job on biwidl machine
         if os.environ['USER'] == 'segerm':
@@ -295,15 +314,7 @@ if __name__ == '__main__':
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
 
-        args.early_exit = True
-
-    wandb.init(
-        project="Dense2Sparse-ViT",
-        # notes="tweak baseline",
-        # tags=["baseline", "paper1"],
-        # config=config,
-    )
-    wandb.config.update(args)
+        # args.early_exit = True
 
     if args.use_ddp:
         print(f'Using distributed data parallel training on {args.world_size} GPUs')
