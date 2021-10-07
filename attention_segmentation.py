@@ -277,6 +277,8 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
         else:
             cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
         # attn /= torch.sum(attn, dim=-1, keepdim=True)  # normalize again after excluding CLS weight
+        # maximum and minimum attention weight across all the heads of one layer for scaling the colormap
+        max_attn_weight, _ = torch.max(attn, dim=1)
         for col in range(num_cols):
             # specify subplot and turn of axis
             axs[row, col].set_xticks([])
@@ -286,32 +288,33 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
             # if classifications is not None:
             #     title_str += f'{"Correct" if classifications[(row * num_cols) + col] else "Wrong"}'
             #         axs[row, col].set_title(title_str, fontsize=12)
-            axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}', fontsize=7, y=0.93)
+            axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}    |   '
+                                    f'{max_attn_weight[col]:.3f}', fontsize=7, y=0.93)
             axs[row, col].imshow(image, interpolation='nearest')
-            current_scores = np.round(attn[col], 4)
-            num_patches = current_scores.shape[0]
+            head_attn = np.round(attn[col], 4)
+            num_patches = head_attn.shape[0]
             patches_per_image_dim = int(np.sqrt(num_patches))
             patch_size = int(image.shape[-2] // np.sqrt(num_patches))
-            current_scores = current_scores.reshape(1, 1, patches_per_image_dim, patches_per_image_dim)
+            head_attn = head_attn.reshape(1, 1, patches_per_image_dim, patches_per_image_dim)
 
-            ## dummy data to test different heatmaps from matplotlib and different values for alpha to overlay
-            ## the heatamp on the image patch drop visualization
-            # if not args.is_sbatch:
-            #    patch_keep = torch.ones((patches_per_image_dim, patches_per_image_dim), device=args.device,
-            #                            dtype=patch_keep_prob.dtype)
-            #    levels = np.expand_dims(np.round(np.arange(start=0.0, stop=1.0, step=1/patches_per_image_dim), 4), axis=1)
-            #    patch_keep_prob = (patch_keep * levels).unsqueeze(0).repeat(patch_keep_prob.shape[0], 1, 1, 1)
-
-            current_scores = interpolate(current_scores, scale_factor=patch_size, mode="nearest")\
+            head_attn = interpolate(head_attn, scale_factor=patch_size, mode="nearest")\
                 .reshape(image.shape[-2], image.shape[-2])
-            heatmap = axs[row, col].imshow(current_scores, cmap='inferno', alpha=0.70)
-    if row == 0 and col == 0:
-    cbar_ax = fig.add_axes([0.05, 0.05, 0.9, 0.02])
-    cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
-    cbar.ax.set_xlabel('Patch scores from predictor network', fontdict={'size': 12})
-    cbar.ax.tick_params(labelsize=10)
+            heatmap = axs[row, col].imshow(head_attn, cmap='inferno', alpha=0.70)
+            # cbar = plt.colorbar(heatmap, ax=axs[row, col])
+            # cbar.set_ticks([cbar.vmax])
+            # cbar.ax.tick_params(labelsize=7)
+            # heatmaps.append(heatmap)
 
-    plt.subplots_adjust(left=0.1, bottom=0.1, right=0.87, top=0.9, wspace=0.1, hspace=0.1)
+        # pos = axs[row, -1].get_position()
+    cbar_ax = fig.add_axes([0.05, 0.12, 0.9, 0.01])
+    cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
+    cbar.set_ticks([cbar.vmin, cbar.vmax])
+    cbar.set_ticklabels(['min', 'max'])
+    cbar.ax.set_xlabel('Attention weight magnitude for different heads (left to right) of an encoder layer,\n'
+                       'starting with the layer nearest to the input at the top and the final layer before\nthe '
+                       'classification head at the bottom. The number above each image are the\nweight of the CLS '
+                       'token and the maximum weight among all the other\nspatial tokens for that attention head.', fontdict={'size': 12})
+    cbar.ax.tick_params(labelsize=10)
 
     suptitle_str = f'CLS attention evolution through layers\n' \
                    f'epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
