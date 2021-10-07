@@ -753,6 +753,22 @@ def dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
             v = resize_pos_embed(v, model.pos_embed)
         out_dict[k] = v
 
+    # if kwargs.get('early_exit', False):
+    #    classifier_dict = {
+    #        'early_exit_head.0.weight': state_dict['norm.weight'],
+    #        'early_exit_head.0.bias': state_dict['norm.bias'],
+    #        'early_exit_head.1.weight': state_dict['head.weight'],
+    #        'early_exit_head.1.bias': state_dict['head.bias'],
+    #    }
+    #    model.load_state_dict(classifier_dict, strict=False)
+    #
+    #   cond = torch.all(model.state_dict()['early_exit_head.0.weight'] == state_dict['norm.weight']).item()
+    #   cond1 = torch.all(model.state_dict()['early_exit_head.0.bias'] == state_dict['norm.bias']).item()
+    #   cond2 = torch.all(model.state_dict()['early_exit_head.1.weight'] == state_dict['head.weight']).item()
+    #   cond3 = torch.all(model.state_dict()['early_exit_head.1.bias'] == state_dict['head.bias']).item()
+    #
+    #   print(cond and cond1 and cond2 and cond3)
+
     model.default_cfg = _cfg()
     missing_keys, unexpected_keys = model.load_state_dict(out_dict, strict=False)
     print('# missing keys=', missing_keys)
