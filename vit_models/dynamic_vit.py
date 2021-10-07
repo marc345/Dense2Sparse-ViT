@@ -40,8 +40,13 @@ def batch_index_select(x, idx):
     if len(x.size()) == 3:
         B, N, C = x.size()
         N_new = idx.size(1)
+        # generate the batch offset for each token sequence in the batch
         offset = torch.arange(B, dtype=torch.long, device=x.device).view(B, 1) * N
+        # generate the absolute token index, not starting with 0 for each token sequence but only for the overall batch
+        # idx in [0, N*B]
         idx = idx + offset
+        # flatten the tokens over all batches into a single patch sequence, also flatten the index than select the
+        # patches with the highest scores and reshape the selected patches back into B token sequences
         out = x.reshape(B*N, C)[idx.reshape(-1)].reshape(B, N_new, C)
         return out
     elif len(x.size()) == 2:
