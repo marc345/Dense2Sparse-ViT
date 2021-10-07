@@ -76,7 +76,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
     cos_lr = args.min_lr + cos_lr * (args.lr - args.min_lr)
     if args.early_exit:
-        early_exit_head_lr = cos_lr * 100
+        early_exit_head_lr = 0 #cos_lr * 10
     if warmup_predictor and step < 1:
         cos_lr = args.lr * 0.01
     if step < warming_up_step:
