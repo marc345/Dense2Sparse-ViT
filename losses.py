@@ -151,17 +151,17 @@ class DistillDiffPruningLoss(torch.nn.Module):
                 loss += self.distill_weight * token_kl_loss
 
         if self.print_mode:
-            self.cls_loss += cls_loss.detach().item()
-            self.cls_distill_loss += cls_kl_loss.detach().item()
+            self.cls_loss += cls_loss.detach().item() * self.clf_weight
+            self.cls_distill_loss += cls_kl_loss.detach().item() * self.distill_weight
 
             if self.early_exit:
                 self.early_exit_cls_loss += early_exit_cls_loss.detach().item()
                 self.early_exit_cls_distill_loss += early_exit_cls_distill_loss.detach().item()
 
             if not self.topk_selection and self.use_ratio_loss:
-                self.ratio_loss += pred_loss.detach().item()
+                self.ratio_loss += pred_loss.detach().item() * self.ratio_weight
             if not self.topk_selection and self.use_token_dist_loss:
-                self.token_distill_loss += token_kl_loss.detach().item()
+                self.token_distill_loss += token_kl_loss.detach().item() * self.distill_weight
 
             self.count += 1
             if self.count % 100 == 1:
