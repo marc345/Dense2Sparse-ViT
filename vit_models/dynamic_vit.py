@@ -761,19 +761,21 @@ class VisionTransformerTeacher(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
+        cls_attns = []
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
-            # return only the CLS token attention weights from the last encoder layer
-            if return_final_cls_attn and i == len(self.blocks)-1:
-                _, final_cls_attn = blk(x, return_cls_attn=return_final_cls_attn)
-                return final_cls_attn
+            x, cls_attn = blk(x, return_cls_attn=True)
+            cls_attns.append(cls_attn.detach().clone())
+            # # return only the CLS token attention weights from the last encoder layer
+            # if return_final_cls_attn and i == len(self.blocks)-1:
+            #     _, final_cls_attn = blk(x, return_cls_attn=return_final_cls_attn)
+            #     return final_cls_attn
 
         feature = self.norm(x)
         cls = feature[:, 0]
         tokens = feature[:, 1:]
         cls = self.pre_logits(cls)
         cls = self.head(cls)
-        return cls, tokens
+        return cls, tokens, cls_attns
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from

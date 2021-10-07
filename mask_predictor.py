@@ -90,169 +90,171 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
         print('Epoch {}/{}'.format(epoch+1, args.epochs))
         print('-' * 50)
 
-        for phase in ['train', 'val']:
-
-            if phase == 'train':
-                warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
-                utils.adjust_learning_rate(optimizer.param_groups, args, epoch,
-                                           warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
-                if args.topk_selection:
-                    # linearly decay sigma of top-k module during training
-                    model.current_sigma = args.current_sigma
-
-            running_loss = 0.0
-            running_acc = 0.0
-            running_keeping_ratio = 0.0
-            running_ee_loss = 0.0
-            running_ee_acc = 0.0
-
-            model.train(mode=(phase == 'train'))
-
-            for i, data in enumerate(tqdm(data_loaders[phase])):
-
-                step_log = {}
-
-                inputs = data[0].to(args.device)
-                labels = data[1].to(args.device)
-
-                # forward
-                with torch.set_grad_enabled(phase == 'train'):
-                    #with torch.cuda.amp.autocast():
-                    outputs = model(inputs.clone())
-                    if phase == 'train':
-                        # zero the parameter gradients
-                        optimizer.zero_grad()
-                        #with torch.cuda.amp.autocast():
-                        loss = criterion(inputs, outputs, labels)
-                        ## this attribute is added by timm on one optimizer (adahessian)
-                        #is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-                        #loss_scaler(loss, optimizer, clip_grad=max_norm,
-                        #            parameters=model.parameters(), create_graph=is_second_order)
-                        # backward + optimize only if in training phase
-                        #grad_scaler.scale(loss).backward()
-                        #grad_scaler.step(optimizer)
-                        #grad_scaler.update()
-                        loss.backward()
-                        #predictor_params = optimizer.param_groups[0]['params']
-                        #predictor_grads = []
-                        #for param in predictor_params:
-                        #    predictor_grads.append(param.grad)
-                        optimizer.step()
-                        preds = torch.argmax(outputs[0].detach(), dim=1)
-                        if args.early_exit:
-                            ee_preds = torch.argmax(outputs[1].detach(), dim=1)
-                    else:
-                        if args.early_exit:
-                            logits, ee_logits, _, final_policy = outputs
-                            ee_preds = torch.argmax(ee_logits.detach(), dim=1)
-                            ee_loss = F.cross_entropy(ee_logits, labels)
-                            loss = F.cross_entropy(logits, labels) + ee_loss
-                        else:
-                            logits, _, final_policy = outputs
-                            loss = F.cross_entropy(logits, labels)
-                        preds = torch.argmax(logits.detach(), dim=1)
-
-
-                # statistics
-                running_loss += loss.detach().item()
-                running_acc += torch.sum(preds == labels.data)/labels.shape[0]
-                if args.early_exit:
-                    running_ee_acc += torch.sum(ee_preds == labels.data)/labels.shape[0]
-                    # print(f'{phase} current ee_acc: {torch.sum(ee_preds == labels.data) / labels.shape[0]:.4f}')
-                #for i, decision in enumerate(getattr(model, "decisions")):
-                if phase == 'train':
-                    # mean token keeping ratio across batch
-                    if args.topk_selection:
-                        running_keeping_ratio += getattr(model, "token_ratio")[-1]
-                    else:
-                        running_keeping_ratio += getattr(model, "num_kept_tokens")[-1]
-                else:
-                    running_keeping_ratio += getattr(model, "token_ratio")[-1]
-
-            #if phase == 'train':
-            #    scheduler.step(epoch)
-
-            epoch_loss = running_loss / len(data_loaders[phase]) #batch_repeat_factor
-            epoch_acc = float(running_acc) / (len(data_loaders[phase])) #batch_repeat_factor
-            if args.early_exit:
-                # ee_epoch_loss = running_ee_loss / len(data_loaders[phase])
-                ee_epoch_acc = float(running_ee_acc) / (len(data_loaders[phase]))
-            if epoch_acc > best_acc:
-                best_acc = epoch_acc
-            args.epoch_acc = epoch_acc
-            epoch_keep_ratio = running_keeping_ratio / len(data_loaders[phase]) #batch_repeat_factor
-            print(f'{phase} loss: {epoch_loss:.4f}, acc: {epoch_acc:.4f}, kept token ratio: {epoch_keep_ratio:.4f}')
-            if args.early_exit:
-                print(f'{phase}: early exit acc: {ee_epoch_acc:.4f}')
-
-            if args.is_sbatch and args.wandb:
-                # wandb.ai logging
-                step_log[f'{phase} total_loss'] = epoch_loss
-                step_log[f'{phase} total_acc'] = epoch_acc
-                if args.early_exit:
-                    step_log[f'{phase} early exit acc'] = ee_epoch_acc
-                if phase == 'train':
-                    step_log['cls_loss'] = criterion.cls_loss/criterion.count
-                    step_log['cls_dist_loss'] = criterion.cls_distill_loss/criterion.count
-                    if args.early_exit:
-                        step_log['early_exit_cls_loss'] = criterion.early_exit_cls_loss / criterion.count
-                        step_log['early_exit_cls_dist_loss'] = criterion.early_exit_cls_distill_loss / criterion.count
-                    if not args.topk_selection and args.use_ratio_loss:
-                        step_log['ratio_loss'] = criterion.ratio_loss/criterion.count
-                    if not args.topk_selection and args.use_token_dist_loss:
-                        step_log['token_distill_loss'] = criterion.token_distill_loss/criterion.count
-                    if not args.topk_selection:
-                        step_log['kept_token_ratio'] = epoch_keep_ratio
-
-        if args.is_sbatch and args.wandb:
-            # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
-            wandb.log(step_log)
-
+        # for phase in ['train', 'val']:
+        #
+        #     if phase == 'train':
+        #         warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
+        #         utils.adjust_learning_rate(optimizer.param_groups, args, epoch,
+        #                                    warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
+        #         if args.topk_selection:
+        #             # linearly decay sigma of top-k module during training
+        #             model.current_sigma = args.current_sigma
+        #
+        #     running_loss = 0.0
+        #     running_acc = 0.0
+        #     running_keeping_ratio = 0.0
+        #     running_ee_loss = 0.0
+        #     running_ee_acc = 0.0
+        #
+        #     model.train(mode=(phase == 'train'))
+        #
+        #     for i, data in enumerate(tqdm(data_loaders[phase])):
+        #
+        #         step_log = {}
+        #
+        #         inputs = data[0].to(args.device)
+        #         labels = data[1].to(args.device)
+        #
+        #         # forward
+        #         with torch.set_grad_enabled(phase == 'train'):
+        #             #with torch.cuda.amp.autocast():
+        #             outputs = model(inputs.clone())
+        #             if phase == 'train':
+        #                 # zero the parameter gradients
+        #                 optimizer.zero_grad()
+        #                 #with torch.cuda.amp.autocast():
+        #                 loss = criterion(inputs, outputs, labels)
+        #                 ## this attribute is added by timm on one optimizer (adahessian)
+        #                 #is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+        #                 #loss_scaler(loss, optimizer, clip_grad=max_norm,
+        #                 #            parameters=model.parameters(), create_graph=is_second_order)
+        #                 # backward + optimize only if in training phase
+        #                 #grad_scaler.scale(loss).backward()
+        #                 #grad_scaler.step(optimizer)
+        #                 #grad_scaler.update()
+        #                 loss.backward()
+        #                 #predictor_params = optimizer.param_groups[0]['params']
+        #                 #predictor_grads = []
+        #                 #for param in predictor_params:
+        #                 #    predictor_grads.append(param.grad)
+        #                 optimizer.step()
+        #                 preds = torch.argmax(outputs[0].detach(), dim=1)
+        #                 if args.early_exit:
+        #                     ee_preds = torch.argmax(outputs[1].detach(), dim=1)
+        #             else:
+        #                 if args.early_exit:
+        #                     logits, ee_logits, _, final_policy = outputs
+        #                     ee_preds = torch.argmax(ee_logits.detach(), dim=1)
+        #                     ee_loss = F.cross_entropy(ee_logits, labels)
+        #                     loss = F.cross_entropy(logits, labels) + ee_loss
+        #                 else:
+        #                     logits, _, final_policy = outputs
+        #                     loss = F.cross_entropy(logits, labels)
+        #                 preds = torch.argmax(logits.detach(), dim=1)
+        #
+        #
+        #         # statistics
+        #         running_loss += loss.detach().item()
+        #         running_acc += torch.sum(preds == labels.data)/labels.shape[0]
+        #         if args.early_exit:
+        #             running_ee_acc += torch.sum(ee_preds == labels.data)/labels.shape[0]
+        #             # print(f'{phase} current ee_acc: {torch.sum(ee_preds == labels.data) / labels.shape[0]:.4f}')
+        #         #for i, decision in enumerate(getattr(model, "decisions")):
+        #         if phase == 'train':
+        #             # mean token keeping ratio across batch
+        #             if args.topk_selection:
+        #                 running_keeping_ratio += getattr(model, "token_ratio")[-1]
+        #             else:
+        #                 running_keeping_ratio += getattr(model, "num_kept_tokens")[-1]
+        #         else:
+        #             running_keeping_ratio += getattr(model, "token_ratio")[-1]
+        #
+        #     #if phase == 'train':
+        #     #    scheduler.step(epoch)
+        #
+        #     epoch_loss = running_loss / len(data_loaders[phase]) #batch_repeat_factor
+        #     epoch_acc = float(running_acc) / (len(data_loaders[phase])) #batch_repeat_factor
+        #     if args.early_exit:
+        #         # ee_epoch_loss = running_ee_loss / len(data_loaders[phase])
+        #         ee_epoch_acc = float(running_ee_acc) / (len(data_loaders[phase]))
+        #     if epoch_acc > best_acc:
+        #         best_acc = epoch_acc
+        #     args.epoch_acc = epoch_acc
+        #     epoch_keep_ratio = running_keeping_ratio / len(data_loaders[phase]) #batch_repeat_factor
+        #     print(f'{phase} loss: {epoch_loss:.4f}, acc: {epoch_acc:.4f}, kept token ratio: {epoch_keep_ratio:.4f}')
+        #     if args.early_exit:
+        #         print(f'{phase}: early exit acc: {ee_epoch_acc:.4f}')
+        #
+        #     if args.is_sbatch and args.wandb:
+        #         # wandb.ai logging
+        #         step_log[f'{phase} total_loss'] = epoch_loss
+        #         step_log[f'{phase} total_acc'] = epoch_acc
+        #         if args.early_exit:
+        #             step_log[f'{phase} early exit acc'] = ee_epoch_acc
+        #         if phase == 'train':
+        #             step_log['cls_loss'] = criterion.cls_loss/criterion.count
+        #             step_log['cls_dist_loss'] = criterion.cls_distill_loss/criterion.count
+        #             if args.early_exit:
+        #                 step_log['early_exit_cls_loss'] = criterion.early_exit_cls_loss / criterion.count
+        #                 step_log['early_exit_cls_dist_loss'] = criterion.early_exit_cls_distill_loss / criterion.count
+        #             if not args.topk_selection and args.use_ratio_loss:
+        #                 step_log['ratio_loss'] = criterion.ratio_loss/criterion.count
+        #             if not args.topk_selection and args.use_token_dist_loss:
+        #                 step_log['token_distill_loss'] = criterion.token_distill_loss/criterion.count
+        #             if not args.topk_selection:
+        #                 step_log['kept_token_ratio'] = epoch_keep_ratio
+        #
+        # if args.is_sbatch and args.wandb:
+        #     # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
+        #     wandb.log(step_log)
+        #
         with torch.no_grad():
             model.eval()
-            if args.early_exit:
-                test_logits, _, cls_attns, final_policy = model(mask_test_imgs.clone())
-            else:
-                test_logits, cls_attns, final_policy = model(mask_test_imgs.clone())
+            # if args.early_exit:
+            #     test_logits, _, cls_attns, final_policy = model(mask_test_imgs.clone())
+            # else:
+            #     test_logits, cls_attns, final_policy = model(mask_test_imgs.clone())
+            test_logits, tokens, cls_attns = model(mask_test_imgs.clone())
             test_preds = torch.argmax(test_logits, dim=1)
 
-            kept_token_idx = getattr(model, "kept_token_indices")
-            dropped_token_idx = getattr(model, "dropped_token_indices")
-            token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
+            # kept_token_idx = getattr(model, "kept_token_indices")
+            # dropped_token_idx = getattr(model, "dropped_token_indices")
+            # token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
+            #
+            # keep_mask = torch.ones_like(kept_token_idx)
+            # drop_mask = torch.zeros_like(dropped_token_idx)
+            # sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
+            # patch_drop_mask = torch.empty_like(sorted_patch_drop_mask)
+            # patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask).unsqueeze(-1)
+            # if not args.topk_selection:
+            #     patch_keep_prob = torch.exp(getattr(model, 'current_score')[:, :, 0])
+            # # only display result after last predictor stage
+            # attention_segmentation.display_patch_drop(mask_test_imgs.cpu(), patch_drop_mask.cpu(), args, epoch,
+            #                                           (test_preds == mask_test_labels).cpu().numpy(),
+            #                                           patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
+            #                                           patch_scores=patch_keep_prob.cpu() if not args.topk_selection
+            #                                           else None)
 
-            keep_mask = torch.ones_like(kept_token_idx)
-            drop_mask = torch.zeros_like(dropped_token_idx)
-            sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
-            patch_drop_mask = torch.empty_like(sorted_patch_drop_mask)
-            patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask).unsqueeze(-1)
-            if not args.topk_selection:
-                patch_keep_prob = torch.exp(getattr(model, 'current_score')[:, :, 0])
-            # only display result after last predictor stage
-            attention_segmentation.display_patch_drop(mask_test_imgs.cpu(), patch_drop_mask.cpu(), args, epoch,
-                                                      (test_preds == mask_test_labels).cpu().numpy(),
-                                                      patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
-                                                      patch_scores=patch_keep_prob.cpu() if not args.topk_selection
-                                                      else None)
-
-            padded_cls_attns = []
-            for i, attn in enumerate(cls_attns):
-                if i < args.pruning_locs[0]:
-                    B, H, N = attn[:, :, 1:].shape
-                    padded_cls_attns.append(attn.unsqueeze(1))
-                else:
-                    B, H, N_kept = attn[:, :, 1:].shape
-                    padded_attn = torch.cat((attn, torch.zeros((B, H, N-N_kept),
-                                                               device=attn.device, dtype=attn.dtype)), dim=2)
-                    padded_cls_attns.append(padded_attn.unsqueeze(1))
+            # padded_cls_attns = []
+            # for i, attn in enumerate(cls_attns):
+            #     if i < args.pruning_locs[0]:
+            #         B, H, N = attn[:, :, 1:].shape
+            #         padded_cls_attns.append(attn.unsqueeze(1))
+            #     else:
+            #         B, H, N_kept = attn[:, :, 1:].shape
+            #         padded_attn = torch.cat((attn, torch.zeros((B, H, N-N_kept),
+            #                                                    device=attn.device, dtype=attn.dtype)), dim=2)
+            #         padded_cls_attns.append(padded_attn.unsqueeze(1))
 
             # concatenate the list of class attentions after each encoder layer
             # permute layer and batch dimension, such that we can visualize the evolution of the CLS token for the same
             # image across all layers in one picture and loop over the batch dimension to plot this picture for every
             # input image in the batch
-            cls_attns = torch.cat(padded_cls_attns, dim=1)  # (B, L, H, N+1)
+            # cls_attns = torch.cat(padded_cls_attns, dim=1)  # (B, L, H, N+1)
+            cls_attns = torch.cat([attn.unsqueeze(1) for attn in cls_attns], dim=1)  # (B, L, H, N+1)
             for b in range(cls_attns.shape[0]):
                 attention_segmentation.visualize_heads(mask_test_imgs[b].cpu(), args, epoch + 1,
-                                                       [kept_token_idx.cpu(), dropped_token_idx.cpu()],
+                                                       [None],
                                                        cls_attns[b].cpu(), b)
 
     time_elapsed = time.time() - since
@@ -429,7 +431,7 @@ if __name__ == '__main__':
         teacher = teacher.to(args.device)
 
         print(f"Start training for {args.epochs} epochs, with batch size of {args.batch_size}")
-        train_model(args, student, criterion, optimizer, mask_test_imgs, mask_test_labels)
+        train_model(args, teacher, criterion, optimizer, mask_test_imgs, mask_test_labels)
 
     print(f'Finished {"distributed data parallel" if args.use_ddp else "single GPU"} training of {args.epochs} epochs '
           f'with batch size {args.batch_size} after {(time.time()-training_start)/60:3.2f} minutes')

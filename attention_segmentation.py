@@ -257,28 +257,16 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     fig, axs = plt.subplots(num_rows, num_cols, figsize=(7, 15),
                             gridspec_kw={'wspace': 0.05, 'hspace': 0.15})
     for l, row in enumerate(range(num_rows)):
-        if l >= args.pruning_locs[0]:
-
-            # if layer is after pruning stage we need to reorder the cls attention as they are sorted by the scores
-            # from the predictor network after the pruning stage
-            patch_indices_repeated = [idx[b_idx].unsqueeze(0).expand(6, -1) for idx in patch_indices]
-            cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
-            sorted_attn = attn.clone()
-            attn.scatter_(dim=1, index=torch.cat(patch_indices_repeated, dim=-1).long(),
-                          src=sorted_attn)
-
-            # th_attn = attn.clone()
-            # th_attn, idx = torch.sort(th_attn, dim=-1)
-            # th_attn /= torch.sum(th_attn, dim=-1, keepdim=True)
-            # cum_sum = torch.cumsum(th_attn, dim=1)
-            # mask = (cum_sum > 0.7).float()
-            # th_attn_mask = torch.empty_like(mask)
-            # th_attn_mask.scatter_(dim=1, index=idx, src=mask)
-        else:
-            cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
+        cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
         # attn /= torch.sum(attn, dim=-1, keepdim=True)  # normalize again after excluding CLS weight
         # maximum and minimum attention weight across all the heads of one layer for scaling the colormap
         max_attn_weight, _ = torch.max(attn, dim=1)
+        th_attn = attn.clone()
+        sorted_attn, idx = torch.sort(th_attn, dim=1)
+        sorted_attn /= torch.sum(sorted_attn, dim=1, keepdim=True)
+        cum_sum = torch.cumsum(sorted_attn, dim=1)
+        mask = (cum_sum > 0.7).float()
+        th_attn.scatter(dim=1, index=idx, src=mask)
         for col in range(num_cols):
             # specify subplot and turn of axis
             axs[row, col].set_xticks([])
@@ -291,7 +279,7 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
             axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}    |   '
                                     f'{max_attn_weight[col]:.3f}', fontsize=7, y=0.93)
             axs[row, col].imshow(image, interpolation='nearest')
-            head_attn = np.round(attn[col], 4)
+            head_attn = np.round(mask[col], 4)
             num_patches = head_attn.shape[0]
             patches_per_image_dim = int(np.sqrt(num_patches))
             patch_size = int(image.shape[-2] // np.sqrt(num_patches))
@@ -321,9 +309,9 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
                    f'using {"perturbed top-k" if args.topk_selection else "gumbel softmax"} predictor\n' \
                    f'Pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
                    f'with keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
-    if args.topk_selection:
-        suptitle_str += f' current sigma: {args.current_sigma:.4f}'
-    fig.suptitle(suptitle_str, fontsize=16)
+    # if args.topk_selection:
+    #     suptitle_str += f' current sigma: {args.current_sigma:.4f}'
+    # fig.suptitle(suptitle_str, fontsize=16)
 
     fig.subplots_adjust(left=0.01, bottom=0.15, right=0.99, top=0.89)
 
