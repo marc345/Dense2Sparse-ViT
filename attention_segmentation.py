@@ -322,8 +322,8 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
         suptitle_str += f' current sigma: {args.current_sigma:.4f}'
     fig.suptitle(suptitle_str, fontsize=16)
 
+    fig.subplots_adjust(left=0.01, bottom=0.15, right=0.99, top=0.89)
 
-    plt.subplots_adjust(wspace=0, hspace=0)
     pathlib.Path(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}/image_{b_idx+1}.jpg")
     plt.close()
