@@ -276,20 +276,30 @@ if __name__ == '__main__':
         args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
         args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor/'
-        if not args.topk_selection:
-            if args.use_ratio_loss and args.use_token_dist_loss:
-                args.patch_selection_method += 'with_kept_token_ratio_and_kept_token_kl_loss/'
-            elif args.use_ratio_loss:
-                args.patch_selection_method += 'with_kept_token_ratio_loss/'
-            elif args.use_token_dist_loss:
-                args.patch_selection_method += 'with_kept_token_kl_loss/'
+        # if not args.topk_selection:
+        #     if args.use_ratio_loss and args.use_token_dist_loss:
+        #         args.patch_selection_method += 'with_kept_token_ratio_and_kept_token_kl_loss/'
+        #     elif args.use_ratio_loss:
+        #         args.patch_selection_method += 'with_kept_token_ratio_loss/'
+        #     elif args.use_token_dist_loss:
+        #         args.patch_selection_method += 'with_kept_token_kl_loss/'
 
         args.job_name = args.patch_selection_method + \
-                        f'pruning_locs_{"_".join([str(loc) for loc in args.pruning_locs])}_keep_ratios_' \
-                        f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
-                        f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
-                        f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
-                        f'{args.job_id}'
+                        f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
+                        f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}' \
+                        # f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
+                        # f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
+                        # f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
+        if args.topk_selection:
+            args.job_name += f'_S{args.initial_sigma}'
+
+            # for top-k the batch size is adapted based on the prunin location
+            # TODO:  Why does top-k increase the memory allocation so much compared to gumbel softmax?
+            # if args.pruning_locs[0] < 7:
+            #     args.batch_size = 32
+            # else:
+            #     args.batch_size = 16
+
         wandb_job_name = f'{os.environ["WANDB_NAME"] + " " if os.environ.get("WANDB_NAME") is not None else ""}' \
                          f'{args.job_name} {str(args.job_id)}'
 
