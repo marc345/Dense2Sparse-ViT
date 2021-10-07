@@ -321,7 +321,7 @@ class HybridEmbed(nn.Module):
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, embed_dim=384, topk_selection=False, k=None):
+    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False):
         super().__init__()
         self.in_conv = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -332,15 +332,24 @@ class PredictorLG(nn.Module):
         self.topk_selection = topk_selection
 
         if topk_selection and k is not None:
-            self.out_conv = nn.Sequential(
-                nn.Linear(embed_dim, embed_dim // 2),
-                nn.GELU(),
-                nn.Linear(embed_dim // 2, embed_dim // 4),
-                nn.GELU(),
-                nn.Linear(embed_dim // 4, 1),
-                nn.Softmax(dim=-2)  # normalize patch scores
-            )
+            # self.out_conv = nn.Sequential(
+            #     nn.Linear(embed_dim, embed_dim // 2),
+            #     nn.GELU(),
+            #     nn.Linear(embed_dim // 2, embed_dim // 4),
+            #     nn.GELU(),
+            #     nn.Linear(embed_dim // 4, 1),
+            #     nn.Softmax(dim=-2)  # normalize patch scores
+            # )
             self.topk = PerturbedTopK(k)
+        elif only_cls_features:
+            self.out_conv = nn.Sequential(
+                nn.Linear(6, 32),
+                nn.GELU(),
+                nn.Linear(32, 32),
+                nn.GELU(),
+                nn.Linear(32, 2),
+                nn.LogSoftmax(dim=-1)
+            )
         else:
             self.out_conv = nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2),
@@ -352,15 +361,22 @@ class PredictorLG(nn.Module):
             )
 
 
-    def forward(self, x, policy, current_sigma=0.05):
-        x = self.in_conv(x)
-        B, N, C = x.size()
-        local_x = x[:,:, :C//2]
-        global_x = (x[:,:, C//2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
-        x = torch.cat([local_x, global_x.expand(B, N, C//2)], dim=-1)
+    def forward(self, x, policy=None, current_sigma=0.05, cls_attn=None):
+        # x = self.in_conv(x)
+        # B, N, C = x.size()  # C
+        # local_x = x[:,:, :C//2]
+        #
+        # if cls_attn is not None:
+        #     # sum of CLS attentions over all heads as z_global
+        #     global_x = torch.sum(cls_attn.permute(0, 2, 1), dim=-1, keepdim=True)  # (B, H, N) -> (B, H, 1)
+        #     # cls_attn shape: (B, H, N+1) slice+permute--> (B, N, H)
+        # else:
+        #     global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
+        #
+        # x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
 
         if self.topk_selection:
-            x = self.out_conv(x).squeeze(-1)
+            # x = self.out_conv(x).squeeze(-1)
             if self.training:
                 return self.topk(x, current_sigma=current_sigma)
             else:
@@ -379,7 +395,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
-                 topk_selection=False):
+                 topk_selection=False, early_exit=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -440,7 +456,9 @@ class VisionTransformerDiffPruning(nn.Module):
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
         predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
-                                      k=int(token_ratio[i]*(img_size/patch_size)**2)) for i in range(len(pruning_loc))]
+                                      k=int(token_ratio[i]*(img_size/patch_size)**2),
+                                      only_cls_features=early_exit)
+                          for i in range(len(pruning_loc))]
 
         self.score_predictor = nn.ModuleList(predictor_list)
 
@@ -454,11 +472,24 @@ class VisionTransformerDiffPruning(nn.Module):
 
         self.attn_selection = attn_selection
         self.attn_selection_threshold = attn_selection_threshold
-        self.cls_attn = []
 
         self.topk_selection = topk_selection
         if self.topk_selection:
             self.current_sigma = 0.05
+
+        self.current_score = None
+
+        self.early_exit = early_exit
+        if early_exit:
+            # Early exit classifier head + normalization layer
+            self.early_exit_head = nn.Sequential(
+                norm_layer(embed_dim),
+                nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+            )
+
+        self.cls_attns = []
+        self.kept_token_indices = None
+        self.dropped_token_indices = None
         ################################################################################################################
 
         self.distill = distill
@@ -492,11 +523,10 @@ class VisionTransformerDiffPruning(nn.Module):
 
     def forward(self, x):
         x = self.patch_embed(x)
-        B, _, D = x.shape
+        B, N, D = x.shape
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
-        N = x.shape[1]
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
@@ -508,15 +538,31 @@ class VisionTransformerDiffPruning(nn.Module):
 
         self.sorted_patch_indices = []
         self.num_kept_tokens = []
-        self.cls_attn = []
+        self.cls_attns = []
+        self.dropped_token_indices = None
+        self.kept_token_indices = torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
 
         for i, blk in enumerate(self.blocks):
+            # at a layer where pruning happens
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
                 if self.topk_selection:
-                    pred_score = self.score_predictor[p_count](spatial_x, prev_decision, self.current_sigma)  # shape: (B, K, N)
+                    max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
+                    pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # shape: (B, K, N)
                 else:
-                    pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
+                    # current_cls_attn.shape: (B, H, N+1)
+                    # current_cls_attn[:, :, 1:].permute(0, 2, 1)
+                    if self.early_exit:
+                        # pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision,
+                        #                                            cls_attn=current_cls_attn[:, :, 1:]).reshape(B, -1, 2)
+                        early_exit_cls = x[:, 0]
+                        pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
+                                                                   policy=prev_decision).reshape(B, -1, 2)
+                    else:
+                        # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
+                        #                                            policy=prev_decision).reshape(B, -1, 2)
+                        pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision).reshape(B, -1, 2)
+                    self.current_score = pred_score.detach().clone()
                 if self.training:
                     if self.topk_selection:
                         cls_x = x[:, 0:1]
@@ -528,14 +574,15 @@ class VisionTransformerDiffPruning(nn.Module):
                         x = blk(x)
                     else:
                         hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
-                        self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision, dim=1)/
+                        self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision.detach(), dim=1)/
                                                                hard_keep_decision.shape[1]))
                         out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
                         cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
                         policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
                         # x, self.current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
-                        x = blk(x, policy=policy)
+                        x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                         prev_decision = hard_keep_decision
+                # during inference return just the patches with the highest scores
                 else:
                     if self.topk_selection:
                         score = pred_score
@@ -543,46 +590,76 @@ class VisionTransformerDiffPruning(nn.Module):
                         score = pred_score[:, :, 0]
                     num_keep_node = int(init_n * self.token_ratio[p_count])
                     keep_policy = torch.argsort(score, dim=1, descending=True)
-                    self.sorted_patch_indices.append(keep_policy.detach())
+                    # self.sorted_patch_indices.append(keep_policy.detach())
+                    drop_policy = keep_policy.detach().clone()[:, num_keep_node:]
                     keep_policy = keep_policy[:, :num_keep_node]
+                    now_dropped_indices = torch.gather(self.kept_token_indices, index=drop_policy, dim=1)
+                    if self.dropped_token_indices is None:
+                        self.dropped_token_indices = now_dropped_indices
+                    else:
+                        self.dropped_token_indices = torch.cat((self.dropped_token_indices, now_dropped_indices), dim=1)
+                    self.kept_token_indices = torch.gather(self.kept_token_indices, index=keep_policy.detach(), dim=1)
                     cls_policy = torch.zeros(B, 1, dtype=keep_policy.dtype, device=keep_policy.device)
                     now_policy = torch.cat([cls_policy, keep_policy + 1], dim=1)
-                    x = batch_index_select(x, now_policy)  # shape: B, N, D
-                    #x = torch.gather(x, dim=1, index=now_policy.unsqueeze(-1).expand(B, N, D))
-                    prev_decision = batch_index_select(prev_decision, keep_policy)  # shape: B, N, 1
-                    #prev_decision = torch.gather(prev_decision, dim=1, index=keep_policy.unsqueeze(-1))[:, :num_keep_node]
-                    # x, self.current_cls_attn = blk(x, return_cls_attn=True)
-                    x = blk(x)
+                    # x = batch_index_select(x, now_policy)  # shape: B, N, D
+                    x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                    # prev_decision = batch_index_select(prev_decision, keep_policy)  # shape: B, N, 1
+                    prev_decision = torch.gather(input=prev_decision, dim=1, index=keep_policy.unsqueeze(-1))
+                    x, current_cls_attn = blk(x, return_cls_attn=True)
                 p_count += 1
+            # for every other layer
             else:
                 if self.training:
                     if self.topk_selection:
-                        x = blk(x)
+                        x, current_cls_attn = blk(x, return_cls_attn=True)
                     else:
-                        x = blk(x, policy=policy)
+                        x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                 else:
-                    x = blk(x)
-            #sorted_cls_attn, sort_idx = torch.sort(self.current_cls_attn[:, :, 1:].detach().clone(), dim=-1)
-            #sorted_cls_attn /= torch.sum(sorted_cls_attn, dim=-1, keepdim=True)
-            #cumsum = torch.cumsum(sorted_cls_attn, dim=-1)
-            #th_attn = (cumsum > 0.5).float()
-            #mean_kept_token = torch.mean(th_attn, dim=-1)
-            #mean_kept_token_total = torch.mean(mean_kept_token)
+                    x, current_cls_attn = blk(x, return_cls_attn=True)
+            # always append a detached version of the current layer CLS token attention weights for visualizations
+            self.cls_attns.append(current_cls_attn.detach().clone())
 
         x = self.norm(x)
         features = x[:, 1:]
         x = x[:, 0]
         x = self.pre_logits(x)
         x = self.head(x)
+        if self.early_exit:
+            early_exit_output = self.early_exit_head(early_exit_cls)
         if self.training:
             if self.topk_selection:
                 return x, features
             if self.distill:
-                return x, features, prev_decision.detach(), out_pred_prob
+                if self.early_exit:
+                    return x, early_exit_output, features, prev_decision.detach(), out_pred_prob
+                else:
+                    return x, features, prev_decision.detach(), out_pred_prob
             else:
                 return x, out_pred_prob
         else:
-            return x, 0, now_policy
+            if self.early_exit:
+                return x, early_exit_output, self.cls_attns, now_policy
+            else:
+                return x, self.cls_attns, now_policy
+
+
+    def forward_cls_attn(self, x):
+        x = self.patch_embed(x)
+        B, _, _ = x.shape
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        for i, blk in enumerate(self.blocks):
+            if i == len(self.blocks) - 1:
+                _, final_cls_attn = blk(x, return_cls_attn=True)
+            else:
+                x = blk(x)
+
+        return final_cls_attn
+
 
 class VisionTransformerTeacher(nn.Module):
     """ Vision Transformer
