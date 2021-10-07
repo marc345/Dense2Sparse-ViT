@@ -306,11 +306,13 @@ if __name__ == '__main__':
         # check if debug job on biwidl machine
         if os.environ['USER'] == 'segerm':
             data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
+            # args.is_sbatch = True
         args.job_name = 'debug_job'
-        args.batch_size = 64
+        args.batch_size = 16
         args.epochs = 10
 
-        args.topk_selection = False
+        args.topk_selection = True
+        args.initial_sigma = 0.05
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
 
