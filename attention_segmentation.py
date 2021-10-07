@@ -254,9 +254,11 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
 
     num_rows = L  # layer count
     num_cols = H  # head count
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(7, 15), gridspec_kw={'wspace': 0.05, 'hspace': 0.1})
+    fig, axs = plt.subplots(num_rows, num_cols, figsize=(7, 15),
+                            gridspec_kw={'wspace': 0.05, 'hspace': 0.15})
     for l, row in enumerate(range(num_rows)):
         if l >= args.pruning_locs[0]:
+
             # if layer is after pruning stage we need to reorder the cls attention as they are sorted by the scores
             # from the predictor network after the pruning stage
             patch_indices_repeated = [idx[b_idx].unsqueeze(0).expand(6, -1) for idx in patch_indices]
