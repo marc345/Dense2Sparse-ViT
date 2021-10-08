@@ -1,35 +1,12 @@
 from __future__ import print_function, division
-import math
-import sys
 import os
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import lr_scheduler
-from torch.utils.data import dataset, DataLoader, Subset
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.cuda.amp import autocast, GradScaler
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, utils as vutils
-from torch.utils.data.sampler import SubsetRandomSampler, SequentialSampler
-from torch.utils.tensorboard import SummaryWriter
-import time
 import numpy as np
-from tqdm import tqdm
-from timm.scheduler import CosineLRScheduler
-from timm.utils import NativeScaler
-import losses
 import random
-import json
-import wandb
 
 import utils
-import attention_segmentation
-from ddp_training import train_model_ddp
-from vit_models import dynamic_vit_small_patch16_224_student
 
 
 seed = 42
@@ -43,24 +20,11 @@ torch.backends.cudnn.benchmark = True
 
 #######################################################################################################################
 
-
-def train_model(args, model, mask_test_imgs, mask_test_labels):
-    with torch.no_grad():
-        model.eval()
-        cls_attns = model.forward_selfattention(mask_test_imgs.clone())
-
-        cls_attns = torch.cat([attn.unsqueeze(1) for attn in cls_attns], dim=1)  # (B, L, H, N+1)
-        for b in range(cls_attns.shape[0]):
-            attention_segmentation.visualize_heads(mask_test_imgs[b].cpu(), args, epoch + 1,
-                                                   [None], cls_attns[b].cpu(), b)
-
-#######################################################################################################################
-
 if __name__ == '__main__':
 
     args = utils.parse_args()
     args_dict = vars(args)
-    args.save_path += 'mask_predictor/'
+    args.save_path += 'unpruned_vit_data/'
     args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     data_dir = args.imgnet_val_dir
@@ -75,32 +39,14 @@ if __name__ == '__main__':
         data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
     else:
         data_dir = "/home/marc/Downloads/ImageNetVal2012/"
-    args.job_name = 'debug_job'
-    args.batch_size = 16
-    args.epochs = 10
 
-    args.topk_selection = True
-    args.initial_sigma = 0.05
-    args.use_ratio_loss = True
-    args.use_token_dist_loss = True
-
-    teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
-    teacher.eval()
-    for param in teacher.parameters():
-        param.requires_grad = False
-
-    dino_model = utils.get_model({'model_name': 'dino_small_dist', 'patch_size': 16}, pretrained=True)
-    dino_model.eval()
-    for param in dino_model.parameters():
-        param.requires_grad = False
-
-    data_transform = {
-        'val': transforms.Compose([
+    #################### DATA PREPARATION
+    data_transform = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor()
-        ]),
-    }
+        ])
+
     data = datasets.ImageFolder(data_dir, transform=data_transform)
 
     #print(indices[split - 64:split])
@@ -117,10 +63,67 @@ if __name__ == '__main__':
     mask_test_imgs = mask_test_imgs.to(args.device)
     mask_test_labels = mask_test_labels.to(args.device)
 
-    teacher = teacher.to(args.device)
 
     for b in range(mask_test_imgs.shape[0]):
         vutils.save_image(mask_test_imgs[b], f'./test_imgs/img{b}.jpeg')
-    exit()
-    train_model(args, dino_model, mask_test_imgs, mask_test_labels)
+
+    model_str_list = ['dynamic_vit_teacher',  # should be the same as deit_small_patch16_224
+                      'dino_small_dist',
+                      'dino_small',
+                      'deit_small_patch16_224',
+                      'deit_small_distilled_patch16_224',
+                      ]
+
+    model_dict = {
+        model_name: utils.get_model({'model_name': model_name, 'patch_size': 16}, pretrained=True)
+        for model_name in model_str_list
+    }
+
+    model_attention_weights = {}
+    model_classifcations = {}
+
+    #################### ITERATE OVER MODELS AND EVALUATE
+    for model_name in model_dict.keys():
+        print(f'Evaluating model {model_name}')
+        model = model_dict[model_name]
+        args.save_path += f'unpruned_vit_data/{model_name}'
+        for param in model.parameters():
+            param.requires_grad = False
+        model.eval()
+        model.to(args.device)
+
+        with torch.no_grad():
+            model.eval()
+            logits = None
+            if model_name == 'dynamic_vit_teacher':
+                logits, _, attn_weight_list = model(mask_test_imgs.clone())
+            elif model_name == 'dino_small_dist':
+                attn_weight_list = model.forward_selfattention(mask_test_imgs.clone())
+            elif model_name == 'dino_small':
+                attn_weight_list = model.forward_selfattention(mask_test_imgs.clone())
+            elif model_name == 'deit_small_patch16_224':
+                attn_weight_list = model.forward_selfattention(mask_test_imgs.clone())
+                logits = model(mask_test_imgs.clone())[-1]
+            elif model_name == 'deit_small_distilled_patch16_224':
+                attn_weight_list = model.forward_selfattention(mask_test_imgs.clone())
+                logits = model(mask_test_imgs.clone())[-1]
+            else:
+                raise NotImplementedError(f'Passed non supported model to evaluation function: {model_name}')
+
+            if logits is not None:
+                preds = torch.argmax(logits, dim=1)
+                classifcations = (preds == mask_test_labels).data
+                model_attention_weights[model_name] = torch.stack(attn_weight_list, dim=0).cpu().numpy()
+                model_classifcations[model_name] = classifcations.cpu().numpy()
+                print(f'For {model_name} model the attention weights list contains {len(attn_weight_list)} elements'
+                      f'of shape {attn_weight_list[0].shape}.\n'
+                      f'This model classified {sum([int(c) for c in classifcations])} of the {len(classifcations)} '
+                      f'samples correctly.\n')
+            else:
+                model_attention_weights[model_name] = torch.stack(attn_weight_list, dim=0).cpu().numpy()
+                print(f'For {model_name} model the attention weights list contains {len(attn_weight_list)} elements'
+                      f'of shape {attn_weight_list[0].shape}.\n')
+
+    np.save('unpruned_model_attention_weights.npy', model_attention_weights)
+    np.save('unpruned_model_classifcations.npy', model_classifcations)
 
