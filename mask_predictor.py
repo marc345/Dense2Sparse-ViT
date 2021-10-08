@@ -331,7 +331,7 @@ if __name__ == '__main__':
         args.epochs = 10
 
         args.topk_selection = True
-        args.initial_sigma = 0.05
+        args.initial_sigma = 0.0005
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
 

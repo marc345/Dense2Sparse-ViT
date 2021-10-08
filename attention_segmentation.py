@@ -299,7 +299,7 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
 
             head_attn = interpolate(head_attn, scale_factor=patch_size, mode="nearest")\
                 .reshape(image.shape[-2], image.shape[-2])
-            heatmap = axs[row, col].imshow(head_attn, cmap='inferno', alpha=0.70)
+            heatmap = axs[row, col].imshow(head_attn, cmap='inferno', alpha=0.75)
             # cbar = plt.colorbar(heatmap, ax=axs[row, col])
             # cbar.set_ticks([cbar.vmax])
             # cbar.ax.tick_params(labelsize=7)
@@ -312,17 +312,18 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     cbar.set_ticklabels(['min', 'max'])
     cbar.ax.set_xlabel('Attention weight magnitude for different heads (left to right) of an encoder layer,\n'
                        'starting with the layer nearest to the input at the top and the final layer before\nthe '
-                       'classification head at the bottom. The number above each image are the\nweight of the CLS '
-                       'token and the maximum weight among all the other\nspatial tokens for that attention head.', fontdict={'size': 12})
+                       'classification head at the bottom. The numbers above each image are the\nweight of the CLS '
+                       'token on the left and the maximum weight among all\nthe other spatial tokens for that '
+                       'attention head on the right.', fontdict={'size': 12})
     cbar.ax.tick_params(labelsize=10)
 
-    suptitle_str = f'CLS attention evolution through layers\n' \
-                   f'epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
-                   f'using {"perturbed top-k" if args.topk_selection else "gumbel softmax"} predictor\n' \
-                   f'Pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
-                   f'with keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
+    suptitle_str = f'CLS token attention weights evolution through ViT layers\n' \
+                   f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
+                   f'Using {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor\n' \
+                   f'Pruning patches before layer [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
+                   f'Keeping ratio of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
     if args.topk_selection:
-        suptitle_str += f' current sigma: {args.current_sigma:.4f}'
+        suptitle_str += f' & current sigma of {args.current_sigma:.7f}'
     fig.suptitle(suptitle_str, fontsize=16)
 
     fig.subplots_adjust(left=0.01, bottom=0.15, right=0.99, top=0.89)
