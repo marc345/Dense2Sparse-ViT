@@ -159,11 +159,14 @@ class Block(nn.Module):
 
     def forward(self, x, return_attention=False):
         y, attn = self.attn(self.norm1(x))
-        if return_attention:
-            return attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        if return_attention and attn.shape[3] == 198:
+            return x, attn[:, :, :2].detach()
+        elif return_attention and attn.shape[3] == 197:
+            return x, attn[:, :, :1].detach()
+        else:
+            return x
 
 
 class PatchEmbed(nn.Module):
@@ -330,11 +333,18 @@ class VisionTransformer(nn.Module):
         x = x + pos_embed
         x = self.pos_drop(x)
 
+        attn_weight_list = []
         for i, blk in enumerate(self.blocks):
-            if i < len(self.blocks) - 1:
-                x = blk(x)
-            else:
-                return blk(x, return_attention=True)
+            x, attn_weights = blk(x, return_attention=True)
+            attn_weight_list.append(attn_weights)
+
+            # if i < len(self.blocks) - 1:
+            #     x = blk(x)
+            # else:
+            #     return blk(x, return_attention=True)[1]
+
+        return attn_weight_list
+
 
 
 class PredictorLG(nn.Module):
@@ -529,8 +539,8 @@ def dino_small(patch_size=16, pretrained=False, **kwargs):
     }
     if pretrained:
         state_dict = torch.hub.load_state_dict_from_url(model_url[patch_size])
-        model.load_state_dict(state_dict, strict=False)
-
+        msg = model.load_state_dict(state_dict, strict=False)
+        print(msg)
     return model
 
 @register_model

@@ -221,7 +221,7 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         if return_cls_attn:
-            return x, attn[:, :, 0, :]  # shape (B, H, N+1)
+            return x, attn[:, :, :1, :].detach()  # shape (B, H, N+1)
         else:
             return x
 
@@ -244,10 +244,10 @@ class Block(nn.Module):
     def forward(self, x, policy=None, return_cls_attn=False):
         if return_cls_attn:
             # return cls_attn in case the patch selection is based upon it and not on scores from the predictor modules
-            x_attn, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
-            x = x + self.drop_path(x_attn)
+            y, cls_attn_weights = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
+            x = x + self.drop_path(y)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
-            return x, cls_attn
+            return x, cls_attn_weights
         else:
             x = x + self.drop_path(self.attn(self.norm1(x), policy=policy))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
@@ -643,24 +643,6 @@ class VisionTransformerDiffPruning(nn.Module):
                 return x, self.cls_attns, now_policy
 
 
-    def forward_cls_attn(self, x):
-        x = self.patch_embed(x)
-        B, _, _ = x.shape
-
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
-        x = self.pos_drop(x)
-
-        for i, blk in enumerate(self.blocks):
-            if i == len(self.blocks) - 1:
-                _, final_cls_attn = blk(x, return_cls_attn=True)
-            else:
-                x = blk(x)
-
-        return final_cls_attn
-
-
 class VisionTransformerTeacher(nn.Module):
     """ Vision Transformer
 
@@ -761,10 +743,10 @@ class VisionTransformerTeacher(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        cls_attns = []
+        cls_attn_weight_list = []
         for i, blk in enumerate(self.blocks):
-            x, cls_attn = blk(x, return_cls_attn=True)
-            cls_attns.append(cls_attn.detach().clone())
+            x, cls_attn_weights = blk(x, return_cls_attn=True)
+            cls_attn_weight_list.append(cls_attn_weights.detach().clone())
             # # return only the CLS token attention weights from the last encoder layer
             # if return_final_cls_attn and i == len(self.blocks)-1:
             #     _, final_cls_attn = blk(x, return_cls_attn=return_final_cls_attn)
@@ -775,7 +757,7 @@ class VisionTransformerTeacher(nn.Module):
         tokens = feature[:, 1:]
         cls = self.pre_logits(cls)
         cls = self.head(cls)
-        return cls, tokens, cls_attns
+        return cls, tokens, cls_attn_weight_list
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
