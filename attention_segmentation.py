@@ -256,8 +256,22 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     num_cols = H  # head count
     fig, axs = plt.subplots(num_rows, num_cols, figsize=(7, 15),
                             gridspec_kw={'wspace': 0.05, 'hspace': 0.15})
+
+    attentions = cls_attns[-1, :, 2:]
+    test = 1
     for l, row in enumerate(range(num_rows)):
-        cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
+        if l == 11:
+            test = 1
+        has_shape_dist = True if cls_attns.shape[-1] == 198 else False
+        if has_shape_dist:
+            # shape distillation token in addition to CLS
+            cls_attn_weights, dist_attn_weights, attn = cls_attns[l, :, 0], \
+                                                        cls_attns[l, :, 1], \
+                                                        cls_attns[l, :, 2:]  # (L, H, N)
+        else:
+            # CLS token only
+            cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
+        spatial_weights_sum = torch.sum(attn, dim=1)
         # attn /= torch.sum(attn, dim=-1, keepdim=True)  # normalize again after excluding CLS weight
         # maximum and minimum attention weight across all the heads of one layer for scaling the colormap
         max_attn_weight, _ = torch.max(attn, dim=1)
@@ -265,8 +279,8 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
         sorted_attn, idx = torch.sort(th_attn, dim=1)
         sorted_attn /= torch.sum(sorted_attn, dim=1, keepdim=True)
         cum_sum = torch.cumsum(sorted_attn, dim=1)
-        mask = (cum_sum > 0.7).float()
-        th_attn.scatter(dim=1, index=idx, src=mask)
+        mask = (cum_sum > 0.1).float()
+        th_attn.scatter_(dim=1, index=idx, src=mask)
         for col in range(num_cols):
             # specify subplot and turn of axis
             axs[row, col].set_xticks([])
@@ -276,10 +290,14 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
             # if classifications is not None:
             #     title_str += f'{"Correct" if classifications[(row * num_cols) + col] else "Wrong"}'
             #         axs[row, col].set_title(title_str, fontsize=12)
-            axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}    |   '
-                                    f'{max_attn_weight[col]:.3f}', fontsize=7, y=0.93)
+            if False:
+                axs[row, col].set_title(f'{cls_attn_weights[col]:.2f} | {dist_attn_weights[col]:.2f} | '
+                                        f'{spatial_weights_sum[col]:.3f}', fontsize=7, y=0.93)
+            else:
+                axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}    |   '
+                                        f'{spatial_weights_sum[col]:.3f}', fontsize=7, y=0.93)
             axs[row, col].imshow(image, interpolation='nearest')
-            head_attn = np.round(mask[col], 4)
+            head_attn = np.round(th_attn[col], 4)
             num_patches = head_attn.shape[0]
             patches_per_image_dim = int(np.sqrt(num_patches))
             patch_size = int(image.shape[-2] // np.sqrt(num_patches))
@@ -294,26 +312,36 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
             # heatmaps.append(heatmap)
 
         # pos = axs[row, -1].get_position()
-    cbar_ax = fig.add_axes([0.05, 0.12, 0.9, 0.01])
-    cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
-    cbar.set_ticks([cbar.vmin, cbar.vmax])
-    cbar.set_ticklabels(['min', 'max'])
-    cbar.ax.set_xlabel('Attention weight magnitude for different heads (left to right) of an encoder layer,\n'
-                       'starting with the layer nearest to the input at the top and the final layer before\nthe '
-                       'classification head at the bottom. The number above each image are the\nweight of the CLS '
-                       'token and the maximum weight among all the other\nspatial tokens for that attention head.', fontdict={'size': 12})
-    cbar.ax.tick_params(labelsize=10)
+    # cbar_ax = fig.add_axes([0.05, 0.12, 0.9, 0.01])
+    # cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
+    # cbar.set_ticks([cbar.vmin, cbar.vmax])
+    # cbar.set_ticklabels(['min', 'max'])
+    # cbar.ax.set_xlabel('Attention weight magnitude for different heads (left to right) of an encoder layer,\n'
+    #                    'starting with the layer nearest to the input at the top and the final layer before\nthe '
+    #                    'classification head at the bottom. The number above each image are the\nweight of the CLS '
+    #                    'token and the maximum weight among all the other\nspatial tokens for that attention head.', fontdict={'size': 12})
+    # cbar.ax.tick_params(labelsize=10)
 
-    suptitle_str = f'CLS attention evolution through layers\n' \
-                   f'epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
-                   f'using {"perturbed top-k" if args.topk_selection else "gumbel softmax"} predictor\n' \
-                   f'Pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
-                   f'with keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
+    # suptitle_str = f'CLS attention evolution through layers\n' \
+    #                f'epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
+    #                f'using {"perturbed top-k" if args.topk_selection else "gumbel softmax"} predictor\n' \
+    #                f'Pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
+    #                f'with keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
     # if args.topk_selection:
     #     suptitle_str += f' current sigma: {args.current_sigma:.4f}'
-    # fig.suptitle(suptitle_str, fontsize=16)
+    suptitle_str = 'Thresholding the attention weights of a DINO ViT-S with patch size 16\n and 14x14 patch grid. ' \
+                   'The numbers above each image indicate\n' \
+                   'the attention weight of the CLS token, the shape token, and the\nsum of all the spatial tokens ' \
+                   'in the self attention of the shape token.\n\n'\
+                   'The bright regions are obtained by keeping the top 90% of the spatial tokens\nand discarding the ' \
+                   'other tokens.\n'\
+                   'Each column visualizes the one of the 6 heads used in the MHSA.\n' \
+                   'Each row visualizes all the heads of one encoder layer,\nstarting with the input layer at the top.'
 
-    fig.subplots_adjust(left=0.01, bottom=0.15, right=0.99, top=0.89)
+
+    fig.suptitle(suptitle_str, fontsize=13)
+
+    fig.subplots_adjust(left=0.01, bottom=0.01, right=0.99, top=0.80)
 
     pathlib.Path(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}/image_{b_idx+1}.jpg")
