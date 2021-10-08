@@ -323,11 +323,6 @@ class PredictorLG(nn.Module):
     """
     def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False):
         super().__init__()
-        self.in_conv = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU()
-        )
 
         self.topk_selection = topk_selection
 
@@ -351,6 +346,11 @@ class PredictorLG(nn.Module):
                 nn.LogSoftmax(dim=-1)
             )
         else:
+            self.in_conv = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim),
+                nn.GELU()
+            )
             self.out_conv = nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2),
                 nn.GELU(),
