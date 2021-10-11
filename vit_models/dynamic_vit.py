@@ -323,11 +323,6 @@ class PredictorLG(nn.Module):
     """
     def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False):
         super().__init__()
-        self.in_conv = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU()
-        )
 
         self.topk_selection = topk_selection
 
@@ -351,6 +346,11 @@ class PredictorLG(nn.Module):
                 nn.LogSoftmax(dim=-1)
             )
         else:
+            self.in_conv = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim),
+                nn.GELU()
+            )
             self.out_conv = nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2),
                 nn.GELU(),
@@ -361,27 +361,25 @@ class PredictorLG(nn.Module):
             )
 
 
-    def forward(self, x, policy=None, current_sigma=0.05, cls_attn=None):
-        # x = self.in_conv(x)
-        # B, N, C = x.size()  # C
-        # local_x = x[:,:, :C//2]
-        #
-        # if cls_attn is not None:
-        #     # sum of CLS attentions over all heads as z_global
-        #     global_x = torch.sum(cls_attn.permute(0, 2, 1), dim=-1, keepdim=True)  # (B, H, N) -> (B, H, 1)
-        #     # cls_attn shape: (B, H, N+1) slice+permute--> (B, N, H)
-        # else:
-        #     global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
-        #
-        # x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
-
+    def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
         if self.topk_selection:
-            # x = self.out_conv(x).squeeze(-1)
             if self.training:
                 return self.topk(x, current_sigma=current_sigma)
             else:
                 return x
         else:
+            x = self.in_conv(x)
+            B, N, C = x.size()  # C
+            local_x = x[:, :, :C//2]
+
+            if cls_attn is not None:
+                # sum of CLS attentions over all heads as z_global
+                global_x = torch.sum(cls_attn.permute(0, 2, 1), dim=-1, keepdim=True)  # (B, H, N) -> (B, H, 1)
+                # cls_attn shape: (B, H, N+1) slice+permute--> (B, N, H)
+            else:
+                global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
+
+            x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
             return self.out_conv(x)
 
 
@@ -547,8 +545,10 @@ class VisionTransformerDiffPruning(nn.Module):
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
                 if self.topk_selection:
+                    # take max attention weight across all heads from CLS token for each patch
                     max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
-                    pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # shape: (B, K, N)
+
+                    pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # (B, K, N)
                 else:
                     # current_cls_attn.shape: (B, H, N+1)
                     # current_cls_attn[:, :, 1:].permute(0, 2, 1)

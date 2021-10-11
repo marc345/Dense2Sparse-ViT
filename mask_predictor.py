@@ -177,7 +177,7 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
             if args.early_exit:
                 # ee_epoch_loss = running_ee_loss / len(data_loaders[phase])
                 ee_epoch_acc = float(running_ee_acc) / (len(data_loaders[phase]))
-            if epoch_acc > best_acc:
+            if phase == 'val' and epoch_acc > best_acc:
                 best_acc = epoch_acc
             args.epoch_acc = epoch_acc
             epoch_keep_ratio = running_keeping_ratio / len(data_loaders[phase]) #batch_repeat_factor
@@ -256,6 +256,8 @@ def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_lab
                                                        cls_attns[b].cpu(), b)
 
     time_elapsed = time.time() - since
+    if args.is_sbatch and args.wandb:
+        wandb.run.summary["best_accuracy"] = best_acc
     print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
     print(f'Best val acc: {best_acc:4f}')
 
@@ -301,6 +303,8 @@ if __name__ == '__main__':
                         # f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
         if args.topk_selection:
             args.job_name += f'_S{args.initial_sigma}'
+        
+        args.job_name += f'_{str(args.job_id)}'
 
             # for top-k the batch size is adapted based on the prunin location
             # TODO:  Why does top-k increase the memory allocation so much compared to gumbel softmax?
@@ -310,7 +314,7 @@ if __name__ == '__main__':
             #     args.batch_size = 16
 
         wandb_job_name = f'{os.environ["WANDB_NAME"] + " " if os.environ.get("WANDB_NAME") is not None else ""}' \
-                         f'{args.job_name} {str(args.job_id)}'
+                         f'{args.job_name}'
 
         wandb.init(
             project="Dense2Sparse-ViT",
@@ -327,11 +331,11 @@ if __name__ == '__main__':
             data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
             # args.is_sbatch = True
         args.job_name = 'debug_job'
-        args.batch_size = 16
+        args.batch_size = 8
         args.epochs = 10
 
-        args.topk_selection = True
-        args.initial_sigma = 0.05
+        args.topk_selection = False
+        args.initial_sigma = 0.0005
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
 
