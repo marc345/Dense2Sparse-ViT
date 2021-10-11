@@ -176,7 +176,7 @@ def save_image_grid(num_rows, num_cols, images, args, epoch_num, patch_scores=No
             axs[row, col].imshow(images[(row * num_cols) + col], interpolation='nearest')
             if patch_scores is not None:
                 current_scores = np.round(patch_scores[(row * num_cols) + col], 4)
-                heatmap = axs[row, col].imshow(current_scores, cmap='cool', alpha=0.35, vmin=0, vmax=1)
+                heatmap = axs[row, col].imshow(current_scores, cmap='inferno', alpha=0.35, vmin=0, vmax=1)
 
     if patch_scores is not None:
         cbar_ax = fig.add_axes([0.05, 0.07, 0.9, 0.03])
@@ -252,81 +252,85 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     # change channel dimension to last dimension: (C, H, W) --> (H, W, C)
     image = image.permute(1, 2, 0).cpu().numpy()
 
-    num_rows = L  # layer count
-    num_cols = H  # head count
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(7, 15),
-                            gridspec_kw={'wspace': 0.05, 'hspace': 0.15})
-    for l, row in enumerate(range(num_rows)):
-        if l >= args.pruning_locs[0]:
+    cls_attns = cls_attns.permute(1, 0, 2)  # H, L, N
 
+    num_rows = H  # layer count
+    num_cols = L  # head count
+    fig, axs = plt.subplots(num_rows, num_cols, figsize=(22, 10), gridspec_kw={'wspace': 0.2, 'hspace': 0.15})
+    for ax in axs.flatten():
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect('equal')
+
+    # th_attn = attn.clone()
+    # th_attn, idx = torch.sort(th_attn, dim=-1)
+    # th_attn /= torch.sum(th_attn, dim=-1, keepdim=True)
+    # cum_sum = torch.cumsum(th_attn, dim=1)
+    # mask = (cum_sum > 0.7).float()
+    # th_attn_mask = torch.empty_like(mask)
+    # th_attn_mask.scatter_(dim=1, index=idx, src=mask)
+
+    cls_attn_weights, spatial_weights = cls_attns[:, :, 0], cls_attns[:, :, 1:]  # H, L, N
+    max_spatial_weights, _ = torch.max(spatial_weights, dim=-1)
+
+    for layer in range(num_cols):
+        if layer >= args.pruning_locs[0]:
             # if layer is after pruning stage we need to reorder the cls attention as they are sorted by the scores
             # from the predictor network after the pruning stage
             patch_indices_repeated = [idx[b_idx].unsqueeze(0).expand(6, -1) for idx in patch_indices]
-            cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
-            sorted_attn = attn.clone()
-            attn.scatter_(dim=1, index=torch.cat(patch_indices_repeated, dim=-1).long(),
-                          src=sorted_attn)
-
-            # th_attn = attn.clone()
-            # th_attn, idx = torch.sort(th_attn, dim=-1)
-            # th_attn /= torch.sum(th_attn, dim=-1, keepdim=True)
-            # cum_sum = torch.cumsum(th_attn, dim=1)
-            # mask = (cum_sum > 0.7).float()
-            # th_attn_mask = torch.empty_like(mask)
-            # th_attn_mask.scatter_(dim=1, index=idx, src=mask)
-        else:
-            cls_attn_weights, attn = cls_attns[l, :, 0], cls_attns[l, :, 1:]  # (L, H, N)
-        # attn /= torch.sum(attn, dim=-1, keepdim=True)  # normalize again after excluding CLS weight
-        # maximum and minimum attention weight across all the heads of one layer for scaling the colormap
-        max_attn_weight, _ = torch.max(attn, dim=1)
-        for col in range(num_cols):
+            # (L, H, N)
+            sorted_weights = spatial_weights[:, layer].clone()
+            spatial_weights[:, layer].scatter_(dim=1, index=torch.cat(patch_indices_repeated, dim=-1).long(),
+                                           src=sorted_weights)
+        for head in range(num_rows):
+            # attn /= torch.sum(attn, dim=-1, keepdim=True)  # normalize again after excluding CLS weight
+            # maximum and minimum attention weight across all the heads of one layer for scaling the colormap
             # specify subplot and turn of axis
-            axs[row, col].set_xticks([])
-            axs[row, col].set_yticks([])
-            axs[row, col].set_aspect('equal')
             # plot filter channel in grayscale
             # if classifications is not None:
             #     title_str += f'{"Correct" if classifications[(row * num_cols) + col] else "Wrong"}'
-            #         axs[row, col].set_title(title_str, fontsize=12)
-            axs[row, col].set_title(f'{cls_attn_weights[col]:.2f}    |   '
-                                    f'{max_attn_weight[col]:.3f}', fontsize=7, y=0.93)
-            axs[row, col].imshow(image, interpolation='nearest')
-            head_attn = np.round(attn[col], 4)
-            num_patches = head_attn.shape[0]
+            #         axs[head, layer].set_title(title_str, fontsize=12)
+            axs[head, layer].set_title(f'{cls_attn_weights[head, layer]:.2f} | '
+                                       f'{torch.sum(spatial_weights[head, layer]):.2f} | '
+                                       f'{max_spatial_weights[head, layer]:.3f}', fontsize=12, y=0.94)
+            axs[head, layer].imshow(image, interpolation='nearest')
+            head_spatial_weights = np.round(spatial_weights[head, layer], 4)
+            num_patches = head_spatial_weights.shape[0]
             patches_per_image_dim = int(np.sqrt(num_patches))
             patch_size = int(image.shape[-2] // np.sqrt(num_patches))
-            head_attn = head_attn.reshape(1, 1, patches_per_image_dim, patches_per_image_dim)
+            head_spatial_weights = head_spatial_weights.reshape(1, 1, patches_per_image_dim, patches_per_image_dim)
 
-            head_attn = interpolate(head_attn, scale_factor=patch_size, mode="nearest")\
+            head_spatial_weights = interpolate(head_spatial_weights, scale_factor=patch_size, mode="nearest")\
                 .reshape(image.shape[-2], image.shape[-2])
-            heatmap = axs[row, col].imshow(head_attn, cmap='inferno', alpha=0.75)
-            # cbar = plt.colorbar(heatmap, ax=axs[row, col])
+            heatmap = axs[head, layer].imshow(head_spatial_weights, cmap='inferno', alpha=0.7)
+            # cbar = plt.colorbar(heatmap, ax=axs[head, layer])
             # cbar.set_ticks([cbar.vmax])
             # cbar.ax.tick_params(labelsize=7)
             # heatmaps.append(heatmap)
 
         # pos = axs[row, -1].get_position()
-    cbar_ax = fig.add_axes([0.05, 0.12, 0.9, 0.01])
+    cbar_ax = fig.add_axes([0.15, 0.08, 0.7, 0.015])
     cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
     cbar.set_ticks([cbar.vmin, cbar.vmax])
     cbar.set_ticklabels(['min', 'max'])
-    cbar.ax.set_xlabel('Attention weight magnitude for different heads (left to right) of an encoder layer,\n'
-                       'starting with the layer nearest to the input at the top and the final layer before\nthe '
-                       'classification head at the bottom. The numbers above each image are the\nweight of the CLS '
-                       'token on the left and the maximum weight among all\nthe other spatial tokens for that '
-                       'attention head on the right.', fontdict={'size': 12})
-    cbar.ax.tick_params(labelsize=10)
+    cbar.ax.set_xlabel('Attention weight magnitude for different attention heads (top to bottom) of an encoder layer, '
+                       'starting with the input layer on the left and the final layer before the '
+                       'output on the right.\nThe numbers above each image are the weight of the CLS '
+                       'token on the left, the sum of all spatial tokens in the middle, and the maximum weight among '
+                       'all spatial tokens on the right.',
+                       fontdict={'size': 16}, y=0.06)
+    cbar.ax.tick_params(labelsize=14)
 
     suptitle_str = f'CLS token attention weights evolution through ViT layers\n' \
-                   f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}\n' \
-                   f'Using {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor\n' \
-                   f'Pruning patches before layer [{",".join(str(loc) for loc in args.pruning_locs)}]\n' \
-                   f'Keeping ratio of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
+                   f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}, ' \
+                   f'sing {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor and ' \
+                   f'pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}] with ' \
+                   f'keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
     if args.topk_selection:
         suptitle_str += f' & current sigma of {args.current_sigma:.7f}'
-    fig.suptitle(suptitle_str, fontsize=16)
+    fig.suptitle(suptitle_str, fontsize=20, y=0.99)
 
-    fig.subplots_adjust(left=0.01, bottom=0.15, right=0.99, top=0.89)
+    fig.subplots_adjust(left=0.01, bottom=0.11, right=0.99, top=0.90)
 
     pathlib.Path(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}/image_{b_idx+1}.jpg")
