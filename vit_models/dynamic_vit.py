@@ -393,7 +393,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
-                 topk_selection=False, early_exit=False):
+                 topk_selection=False, early_exit=False, mean_heads=False, random_drop=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -470,6 +470,9 @@ class VisionTransformerDiffPruning(nn.Module):
         self.topk_selection = topk_selection
         if self.topk_selection:
             self.current_sigma = 0.05
+        self.mean_heads = mean_heads
+
+        self.random_drop = random_drop
 
         self.current_score = None
 
