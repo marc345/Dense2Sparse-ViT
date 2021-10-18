@@ -244,8 +244,8 @@ class Block(nn.Module):
     def forward(self, x, policy=None, return_cls_attn=False):
         if return_cls_attn:
             # return cls_attn in case the patch selection is based upon it and not on scores from the predictor modules
-            x_attn, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
-            x = x + self.drop_path(x_attn)
+            y, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
+            x = x + self.drop_path(y)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x, cls_attn
         else:
