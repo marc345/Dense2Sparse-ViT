@@ -518,7 +518,7 @@ class VisionTransformerDiffPruning(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, stacked_cls_attn_weights=None):
         x = self.patch_embed(x)
         B, N, D = x.shape
 
@@ -549,21 +549,37 @@ class VisionTransformerDiffPruning(nn.Module):
                 ################################### TOP-K SCORE GENERATION #############################################
                 ########################################################################################################
                 if self.topk_selection:
-                    # take max attention weight across all heads from CLS token for each patch
-                    max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
-
-                    pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # (B, K, N)
+                    if stacked_cls_attn_weights is not None:
+                        # sum weights across all layers and normalize with number of layers
+                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
+                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
+                        if self.mean_heads:
+                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
+                        else:
+                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](cls_attn_weights,
+                                                                   current_sigma=self.current_sigma)  # (B, K, N)
+                    else:
+                        # take max attention weight across all heads from CLS token for each patch
+                        if self.mean_heads:
+                            current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                        else:
+                            current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](current_cls_attn,
+                                                                   current_sigma=self.current_sigma)  # (B, K, N)
                 ########################################################################################################
                 ############################### DYNAMIC VIT SCORE GENERATION ###########################################
                 ########################################################################################################
                 else:
-                    # current_cls_attn.shape: (B, H, N+1)
-                    # current_cls_attn[:, :, 1:].permute(0, 2, 1)
-                    if self.early_exit:
-                        # pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision,
-                        #                                            cls_attn=current_cls_attn[:, :, 1:]).reshape(B, -1, 2)
-                        early_exit_cls = x[:, 0]
-                        pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
+                    if stacked_cls_attn_weights is not None:
+                        # sum weights across all layers and normalize with number of layers
+                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
+                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
+                        if self.mean_heads:
+                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
+                        else:
+                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](cls_attn_weights[:, :, 1:].permute(0, 2, 1),
                                                                    policy=prev_decision).reshape(B, -1, 2)
                     else:
                         # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
