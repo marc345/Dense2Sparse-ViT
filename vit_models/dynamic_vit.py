@@ -593,6 +593,9 @@ class VisionTransformerDiffPruning(nn.Module):
                         # x, self.current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                         x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                         prev_decision = hard_keep_decision
+                ########################################################################################################
+                ################################## PRUNING DURING INFERENCE ############################################
+                ########################################################################################################
                 # during inference return just the patches with the highest scores
                 else:
                     if self.topk_selection:
@@ -618,7 +621,9 @@ class VisionTransformerDiffPruning(nn.Module):
                     prev_decision = torch.gather(input=prev_decision, dim=1, index=keep_policy.unsqueeze(-1))
                     x, current_cls_attn = blk(x, return_cls_attn=True)
                 p_count += 1
-            # for every other layer
+            ############################################################################################################
+            ######################################## NON-PRUNING ENCODER LAYER #########################################
+            ############################################################################################################
             else:
                 if self.training:
                     if self.topk_selection:
