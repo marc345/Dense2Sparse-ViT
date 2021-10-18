@@ -540,14 +540,23 @@ class VisionTransformerDiffPruning(nn.Module):
         self.kept_token_indices = torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
 
         for i, blk in enumerate(self.blocks):
+            ############################################################################################################
+            ########################################## PRUNING ENCODER LAYER ###########################################
+            ############################################################################################################
             # at a layer where pruning happens
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
+                ########################################################################################################
+                ################################### TOP-K SCORE GENERATION #############################################
+                ########################################################################################################
                 if self.topk_selection:
                     # take max attention weight across all heads from CLS token for each patch
                     max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
 
                     pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # (B, K, N)
+                ########################################################################################################
+                ############################### DYNAMIC VIT SCORE GENERATION ###########################################
+                ########################################################################################################
                 else:
                     # current_cls_attn.shape: (B, H, N+1)
                     # current_cls_attn[:, :, 1:].permute(0, 2, 1)
@@ -562,6 +571,9 @@ class VisionTransformerDiffPruning(nn.Module):
                         #                                            policy=prev_decision).reshape(B, -1, 2)
                         pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision).reshape(B, -1, 2)
                     self.current_score = pred_score.detach().clone()
+                ########################################################################################################
+                ################################### PRUNING DURING TRAINING ############################################
+                ########################################################################################################
                 if self.training:
                     if self.topk_selection:
                         cls_x = x[:, 0:1]
