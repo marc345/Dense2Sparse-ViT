@@ -41,7 +41,7 @@ class DistillDiffPruningLoss(torch.nn.Module):
 
         print('cls_weight=', clf_weight, 'distill_weight=', distill_weight, 'softmax_temp=', softmax_temp)
         if not self.topk_selection and self.use_token_dist_loss:
-            print('using KL divergence of final layer tokens in loss function (weight: see distill_weight above')
+            print('using KL divergence of final layer tokens in loss function (weight: see distill_weight above)')
         if not self.topk_selection and self.use_ratio_loss:
             print(f'using ratio of kept tokens in loss function, weight={ratio_weight}')
 
