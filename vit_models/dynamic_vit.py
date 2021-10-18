@@ -461,10 +461,6 @@ class VisionTransformerDiffPruning(nn.Module):
         self.score_predictor = nn.ModuleList(predictor_list)
 
         ########################################  DYNAMIC VIT MODIFICATONS #############################################
-        # a list of the sorted patch indices (before dropping and based on the original token sequence length) where
-        # sorting was done based on the prediction modules scores in descending order
-        # len --> number of prediction modules
-        self.sorted_patch_indices = []
         # the number of kept tokens during training at each prediction module
         self.num_kept_tokens = []
 
