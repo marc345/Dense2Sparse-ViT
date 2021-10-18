@@ -246,16 +246,16 @@ if __name__ == '__main__':
     if args.is_sbatch:
         args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
-        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor/'
-        # if not args.topk_selection:
-        #     if args.use_ratio_loss and args.use_token_dist_loss:
-        #         args.patch_selection_method += 'with_kept_token_ratio_and_kept_token_kl_loss/'
-        #     elif args.use_ratio_loss:
-        #         args.patch_selection_method += 'with_kept_token_ratio_loss/'
-        #     elif args.use_token_dist_loss:
-        #         args.patch_selection_method += 'with_kept_token_kl_loss/'
+        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor'
+        if args.topk_selection:
+            if args.random_drop:
+                args.patch_selection_method += '_random_drop/'
+            else:
+                args.patch_selection_method += f"{'_mean_heads' if args.mean_heads else '_max_heads'}/"
+        else:
+            args.patch_selection_method = '/'
 
-        args.job_name = args.patch_selection_method + \
+        args.job_name = 'GT_' + args.patch_selection_method + \
                         f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
                         f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}' \
                         # f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
@@ -311,14 +311,13 @@ if __name__ == '__main__':
         args_dict = vars(args)
         sorted_keys = sorted(args_dict.keys(), key=lambda x: x.lower())
         for i, key in enumerate(sorted_keys):
-            if i % 5 == 0:
-                print('\n     ', end='')
-            print(f'{key}: {args_dict[key]}', end=',      ')
+            print(f'{key}: {args_dict[key]}')
         print('\n')
 
         # get the model specified as argument
         student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection, early_exit=args.early_exit)
+                                                        topk_selection=args.topk_selection, early_exit=args.early_exit,
+                                                        mean_heads=args.mean_heads, random_drop=args.random_drop)
         parameter_group = utils.get_param_groups(student, args)
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
@@ -332,18 +331,13 @@ if __name__ == '__main__':
         #    param.requires_grad = False
 
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
-        optimizer = torch.optim.AdamW(parameter_group, **opt_args)
+        optim = torch.optim.AdamW(parameter_group, **opt_args)
 
         criterion = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
                                                   ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
                                                   pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
                                                   base_criterion=torch.nn.CrossEntropyLoss(),
                                                   softmax_temp=args.softmax_temp, early_exit=args.early_exit)
-
-        #cosine_lr_scheduler = CosineLRScheduler(optimizer, t_initial=30, lr_min=1e-5, decay_rate=0.1, warmup_t=5,
-        #                                        warmup_lr_init=1e-6)
-        # cuda automatic mixed precision grad scaler
-        #grad_scaler = GradScaler()
 
         data = {x: datasets.ImageFolder(data_dir, transform=data_transforms[x])
                 for x in ['train', 'val']}
