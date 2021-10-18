@@ -603,8 +603,18 @@ class VisionTransformerDiffPruning(nn.Module):
                     else:
                         score = pred_score[:, :, 0]
                     num_keep_node = int(init_n * self.token_ratio[p_count])
-                    keep_policy = torch.argsort(score, dim=1, descending=True)
-                    # self.sorted_patch_indices.append(keep_policy.detach())
+                    if self.random_drop:
+                        # randomly drop patches
+                        # random shuffle of keep policy for each image in the batch
+                        idxs = []
+                        for b in range(keep_policy.shape[0]):
+                            idxs.append(torch.randperm(N))
+                        idxs = torch.stack(idxs, dim=0).to(keep_policy.device)
+                        # keep_policy = torch.gather(index=idxs, input=keep_policy, dim=1)
+                        keep_policy = idxs
+                    else:
+                        # sort score in descending order and take top most according to keep ratio
+                        keep_policy = torch.argsort(score, dim=1, descending=True)
                     drop_policy = keep_policy.detach().clone()[:, num_keep_node:]
                     keep_policy = keep_policy[:, :num_keep_node]
                     now_dropped_indices = torch.gather(self.kept_token_indices, index=drop_policy, dim=1)
