@@ -58,6 +58,56 @@ def generate_figures(model, image_idx, threshold, use_shape):
         cls_weights = torch.Tensor(cls_weights)
         spatial_weights = torch.Tensor(spatial_weights)
 
+    # take mean across all layers of CLS attention weight for CLS token
+    cls_weights_avg = torch.mean(cls_weights, dim=1)
+    # add mean across heads
+    mean_cls_avg = torch.mean(cls_weights_avg, dim=0)
+    # add max across heads
+    max_cls_avg, _ = torch.max(cls_weights_avg, dim=0)
+    # concatenate the averaged CLS attention weights (across the layers) with their mean and max
+    cls_weights_avg = torch.cat((cls_weights_avg, mean_cls_avg.unsqueeze(0), max_cls_avg.unsqueeze(0)), dim=0)
+
+    # add artificial attention head consisting of the MAX of all the normal attention heads of the current encoder layer
+    mean_cls_weights = torch.mean(cls_weights, dim=0)
+    # add artificial attention head consisting of the MAX of all the normal attention heads of the current encoder layer
+    max_cls_weights, _ = torch.max(cls_weights, dim=0)
+    # concatenate normale attention heads with the MEAN and MAX head for plotting
+    cls_weights = torch.cat((cls_weights, mean_cls_weights.unsqueeze(0), max_cls_weights.unsqueeze(0)), dim=0)
+
+    cls_weights = torch.cat((cls_weights, cls_weights_avg.unsqueeze(1)), dim=1)
+
+    if has_shape_token:
+        # take mean across all layers of CLS attention weight for shape token if it exists
+        shape_weights_avg = torch.mean(shape_weights, dim=1)
+        mean_shape_avg = torch.mean(shape_weights_avg, dim=0)
+        max_shape_avg, _ = torch.max(shape_weights_avg, dim=0)
+        shape_weights_avg = torch.cat((shape_weights_avg, mean_shape_avg.unsqueeze(0), max_shape_avg.unsqueeze(0)), dim=0)
+
+        # add artificial attention head consisting of the MEAN of all the normal attention heads of the current encoder layer
+        mean_shape_weights = torch.mean(shape_weights, dim=0)
+        # add artificial attention head consisting of the MAX of all the normal attention heads of the current encoder layer
+        max_shape_weights, _ = torch.max(shape_weights, dim=0)
+        # concatenate normale attention heads with the MEAN and MAX head for plotting
+        shape_weights = torch.cat((shape_weights, mean_shape_weights.unsqueeze(0), max_shape_weights.unsqueeze(0)), dim=0)
+
+        shape_weights = torch.cat((shape_weights, shape_weights_avg.unsqueeze(1)), dim=1)
+
+    # average CLS token attention weights for the spatial tokens across all encoder layers
+    attn_avg = torch.mean(spatial_weights, dim=1)  # average across layers
+    mean_attn_avg = torch.mean(attn_avg, dim=0)  # aggregate across heads
+    max_attn_avg, _ = torch.max(attn_avg, dim=0)  # aggregate averaged layers across heads
+    attn_avg = torch.cat((attn_avg, mean_attn_avg.unsqueeze(0), max_attn_avg.unsqueeze(0)), dim=0)
+
+    # add artificial attention head that consists of the MEAN of all the current encoder layer's attention heads
+    mean_attns = torch.mean(spatial_weights, dim=0)  # aggregate across heads
+    # add artificial attention head that consists of the MAX of all the current encoder layer's attention heads
+    max_attns, _ = torch.max(spatial_weights, dim=0)  # aggregate across heads
+    # add mean and max across heads to head dimension
+    spatial_weights = torch.cat((spatial_weights, mean_attns.unsqueeze(0), max_attns.unsqueeze(0)), dim=0)
+
+    # add summed layers as last layer
+    spatial_weights = torch.cat((spatial_weights, attn_avg.unsqueeze(1)), dim=1)
+
     num_rows = spatial_weights.shape[0]  # HEADS
     num_columns = spatial_weights.shape[1]  # LAYERS
 
@@ -87,10 +137,10 @@ def generate_figures(model, image_idx, threshold, use_shape):
             axs[head, layer].set_aspect('equal')
             if has_shape_token:
                 axs[head, layer].set_title(f'{cls_weights[head, layer]:.2f} | {shape_weights[head, layer]:.2f} | '
-                                           f'{spatial_weights_max[head, layer]:.3f}', fontsize=15, y=0.96)
+                                           f'{spatial_weights_max[head, layer]:.3f}', fontsize=15, y=0.94)
             else:
                 axs[head, layer].set_title(f'{cls_weights[head, layer]:.2f} | {spatial_weights_max[head, layer]:.3f}',
-                                           fontsize=16, y=0.96)
+                                           fontsize=16, y=0.94)
             # axs[head, layer].imshow(image, interpolation='nearest')
             head_attn = np.round(th_attn[head, layer], 4)
             num_patches = head_attn.shape[0]
@@ -205,7 +255,7 @@ model_names = list(model_attn_weights[()].keys())
 model_classifcations = model_classifcations[()]
 model_attn_weights = model_attn_weights[()]
 
-model_str_list = ['dynamic_vit_teacher',  # should be the same as deit_small_patch16_224
+model_str_list = [#'dynamic_vit_teacher',  # should be the same as deit_small_patch16_224
                   'dino_small_dist',
                   'dino_small',
                   'deit_small_patch16_224',
@@ -219,16 +269,20 @@ for model in model_str_list:
         for threshold in thresholds:
             if 'dist' in model:
                 for use_shape in [True, False]:
-                    savepath = f'/scratch_net/biwidl215/segerm/thresholded_model_attentions/{model}/image{image_idx}/'
+                    if os.environ['USER'] == 'segerm':
+                        savepath = f'/scratch_net/biwidl215/segerm/thresholded_model_attentions/{model}/image{image_idx}/'
+                    else:
+                        savepath = f'thresholded_model_attentions/{model}/image{image_idx}/'
                     savepath += 'using_shape/' if use_shape else ''
-                    # savepath = 'thresholded_model_attentions/'
                     pathlib.Path(savepath).mkdir(parents=True, exist_ok=True)
                     print(f'Generating thresholded attention map for model {model} with image{image_idx} and threshold '
                           f'{threshold}, {"without" if not use_shape else ""} using shape')
                     generate_figures(model, image_idx, threshold, use_shape)
             else:
-                savepath = f'/scratch_net/biwidl215/segerm/thresholded_model_attentions/{model}/image{image_idx}/'
-                # savepath = 'thresholded_model_attentions/'
+                if os.environ['USER'] == 'segerm':
+                    savepath = f'/scratch_net/biwidl215/segerm/thresholded_model_attentions/{model}/image{image_idx}/'
+                else:
+                    savepath = f'thresholded_model_attentions/{model}/image{image_idx}/'
                 pathlib.Path(savepath).mkdir(parents=True, exist_ok=True)
                 print(f'Generating thresholded attention map for model {model} with image{image_idx} and threshold '
                       f'{threshold}')
