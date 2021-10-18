@@ -78,188 +78,148 @@ class MyDataParallel(torch.nn.DataParallel):
 
 
 #######################################################################################################################
+#######################################################################################################################
 # main training function
 
 
-def train_model(args, model, criterion, optimizer, mask_test_imgs, mask_test_labels):
-    since = time.time()
+def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function, optimizer):
 
-    best_acc = 0.0
+    running_loss = 0.0
+    running_acc = 0.0
+    running_keeping_ratio = 0.0
 
-    for epoch in range(args.epochs):
-        print('Epoch {}/{}'.format(epoch+1, args.epochs))
-        print('-' * 50)
+    metrics = {}
 
-        for phase in ['train', 'val']:
+    model.train()
 
-            if phase == 'train':
-                warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
-                utils.adjust_learning_rate(optimizer.param_groups, args, epoch,
-                                           warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
-                if args.topk_selection:
-                    # linearly decay sigma of top-k module during training
-                    model.current_sigma = args.current_sigma
+    for train_inputs, train_labels in tqdm(train_data_loader):
+        train_inputs = train_inputs.to(args.device)
+        train_labels = train_labels.to(args.device)
 
-            running_loss = 0.0
-            running_acc = 0.0
-            running_keeping_ratio = 0.0
-            running_ee_loss = 0.0
-            running_ee_acc = 0.0
+        cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
+        # forward
+        outputs = model(train_inputs.clone(), cls_attn_weights)
+        # zero the parameter gradients
+        optimizer.zero_grad()
+        train_loss = loss_function(train_inputs, outputs, train_labels)
+        train_loss.backward()
+        optimizer.step()
+        preds = torch.argmax(outputs[0].detach(), dim=1)
 
-            model.train(mode=(phase == 'train'))
+        # statistics
+        running_loss += train_loss.detach().item()
+        running_acc += torch.sum(preds == train_labels.data) / train_labels.shape[0]
 
-            for i, data in enumerate(tqdm(data_loaders[phase])):
+        # for i, decision in enumerate(getattr(model, "decisions")):
+        # mean token keeping ratio across batch
+        if args.topk_selection:
+            running_keeping_ratio += getattr(model, "token_ratio")[-1]
+        else:
+            running_keeping_ratio += getattr(model, "num_kept_tokens")[-1]
 
-                step_log = {}
+    metrics["train_loss"] = running_loss / len(train_data_loader)  # batch_repeat_factor
+    metrics["train_acc"] = float(running_acc) / (len(train_data_loader))  # batch_repeat_factor
 
-                inputs = data[0].to(args.device)
-                labels = data[1].to(args.device)
+    metrics['cls_loss'] = loss_function.cls_loss / loss_function.count
+    metrics['cls_dist_loss'] = loss_function.cls_distill_loss / loss_function.count
+    if not args.topk_selection and args.use_ratio_loss:
+        metrics['ratio_loss'] = loss_function.ratio_loss / loss_function.count
+    if not args.topk_selection and args.use_token_dist_loss:
+        metrics['token_distill_loss'] = loss_function.token_distill_loss / loss_function.count
+    if not args.topk_selection:
+        metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
+        print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
 
-                # forward
-                with torch.set_grad_enabled(phase == 'train'):
-                    #with torch.cuda.amp.autocast():
-                    outputs = model(inputs.clone())
-                    if phase == 'train':
-                        # zero the parameter gradients
-                        optimizer.zero_grad()
-                        #with torch.cuda.amp.autocast():
-                        loss = criterion(inputs, outputs, labels)
-                        ## this attribute is added by timm on one optimizer (adahessian)
-                        #is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-                        #loss_scaler(loss, optimizer, clip_grad=max_norm,
-                        #            parameters=model.parameters(), create_graph=is_second_order)
-                        # backward + optimize only if in training phase
-                        #grad_scaler.scale(loss).backward()
-                        #grad_scaler.step(optimizer)
-                        #grad_scaler.update()
-                        loss.backward()
-                        #predictor_params = optimizer.param_groups[0]['params']
-                        #predictor_grads = []
-                        #for param in predictor_params:
-                        #    predictor_grads.append(param.grad)
-                        optimizer.step()
-                        preds = torch.argmax(outputs[0].detach(), dim=1)
-                        if args.early_exit:
-                            ee_preds = torch.argmax(outputs[1].detach(), dim=1)
-                    else:
-                        if args.early_exit:
-                            logits, ee_logits, _, final_policy = outputs
-                            ee_preds = torch.argmax(ee_logits.detach(), dim=1)
-                            ee_loss = F.cross_entropy(ee_logits, labels)
-                            loss = F.cross_entropy(logits, labels) + ee_loss
-                        else:
-                            logits, _, final_policy = outputs
-                            loss = F.cross_entropy(logits, labels)
-                        preds = torch.argmax(logits.detach(), dim=1)
+    print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}')
+
+    return metrics
+
+#######################################################################################################################
+#######################################################################################################################
 
 
-                # statistics
-                running_loss += loss.detach().item()
-                running_acc += torch.sum(preds == labels.data)/labels.shape[0]
-                if args.early_exit:
-                    running_ee_acc += torch.sum(ee_preds == labels.data)/labels.shape[0]
-                    # print(f'{phase} current ee_acc: {torch.sum(ee_preds == labels.data) / labels.shape[0]:.4f}')
-                #for i, decision in enumerate(getattr(model, "decisions")):
-                if phase == 'train':
-                    # mean token keeping ratio across batch
-                    if args.topk_selection:
-                        running_keeping_ratio += getattr(model, "token_ratio")[-1]
-                    else:
-                        running_keeping_ratio += getattr(model, "num_kept_tokens")[-1]
-                else:
-                    running_keeping_ratio += getattr(model, "token_ratio")[-1]
+def evaluate(args, model, teacher_model, val_data_loader):
 
-            #if phase == 'train':
-            #    scheduler.step(epoch)
+    running_loss = 0.0
+    running_acc = 0.0
 
-            epoch_loss = running_loss / len(data_loaders[phase]) #batch_repeat_factor
-            epoch_acc = float(running_acc) / (len(data_loaders[phase])) #batch_repeat_factor
-            if args.early_exit:
-                # ee_epoch_loss = running_ee_loss / len(data_loaders[phase])
-                ee_epoch_acc = float(running_ee_acc) / (len(data_loaders[phase]))
-            if phase == 'val' and epoch_acc > best_acc:
-                best_acc = epoch_acc
-            args.epoch_acc = epoch_acc
-            epoch_keep_ratio = running_keeping_ratio / len(data_loaders[phase]) #batch_repeat_factor
-            print(f'{phase} loss: {epoch_loss:.4f}, acc: {epoch_acc:.4f}, kept token ratio: {epoch_keep_ratio:.4f}')
-            if args.early_exit:
-                print(f'{phase}: early exit acc: {ee_epoch_acc:.4f}')
+    model.eval()
 
-            if args.is_sbatch and args.wandb:
-                # wandb.ai logging
-                step_log[f'{phase} total_loss'] = epoch_loss
-                step_log[f'{phase} total_acc'] = epoch_acc
-                if args.early_exit:
-                    step_log[f'{phase} early exit acc'] = ee_epoch_acc
-                if phase == 'train':
-                    step_log['cls_loss'] = criterion.cls_loss/criterion.count
-                    step_log['cls_dist_loss'] = criterion.cls_distill_loss/criterion.count
-                    if args.early_exit:
-                        step_log['early_exit_cls_loss'] = criterion.early_exit_cls_loss / criterion.count
-                        step_log['early_exit_cls_dist_loss'] = criterion.early_exit_cls_distill_loss / criterion.count
-                    if not args.topk_selection and args.use_ratio_loss:
-                        step_log['ratio_loss'] = criterion.ratio_loss/criterion.count
-                    if not args.topk_selection and args.use_token_dist_loss:
-                        step_log['token_distill_loss'] = criterion.token_distill_loss/criterion.count
-                    if not args.topk_selection:
-                        step_log['kept_token_ratio'] = epoch_keep_ratio
+    metrics = {}
 
-        if args.is_sbatch and args.wandb:
-            # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
-            wandb.log(step_log)
+    for val_inputs, val_labels in tqdm(val_data_loader):
+        val_inputs = val_inputs.to(args.device)
+        val_labels = val_labels.to(args.device)
 
-        with torch.no_grad():
-            model.eval()
-            if args.early_exit:
-                test_logits, _, cls_attns, final_policy = model(mask_test_imgs.clone())
+        cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
+
+        outputs = model(val_inputs.clone(), cls_attn_weights)
+        logits, _, _ = outputs
+
+        loss = F.cross_entropy(logits, val_labels)
+        preds = torch.argmax(logits.detach(), dim=1)
+
+        # statistics
+        running_loss += loss.detach().item()
+        running_acc += torch.sum(preds == val_labels.data) / val_labels.shape[0]
+
+    metrics['val_loss'] = running_loss / len(val_data_loader)  # batch_repeat_factor
+    metrics['val_acc'] = float(running_acc) / (len(val_data_loader))  # batch_repeat_factor
+    args.epoch_acc = metrics['val_acc']  # for title of visualization plot
+    print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}')
+
+    return metrics
+
+#######################################################################################################################
+#######################################################################################################################
+
+
+def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
+    model.eval()
+    with torch.no_grad():
+        cls_attn_weights = teacher_model.forward_cls_attention(test_imgs.clone())  # (B, L, H, N+1)
+        model.eval()
+        test_logits, cls_attns, final_policy = model(test_imgs.clone(), cls_attn_weights)
+        test_preds = torch.argmax(test_logits, dim=1)
+
+        kept_token_idx = getattr(model, "kept_token_indices")
+        dropped_token_idx = getattr(model, "dropped_token_indices")
+        token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
+
+        keep_mask = torch.ones_like(kept_token_idx)
+        drop_mask = torch.zeros_like(dropped_token_idx)
+        sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
+        patch_drop_mask = torch.empty_like(sorted_patch_drop_mask)
+        patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask).unsqueeze(-1)
+        if not args.topk_selection:
+            patch_keep_prob = torch.exp(getattr(model, 'current_score')[:, :, 0])
+        # only display result after last predictor stage
+        attention_segmentation.display_patch_drop(test_imgs.cpu(), patch_drop_mask.cpu(), args, current_epoch + 1,
+                                                  (test_preds == test_labels).cpu().numpy(),
+                                                  patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
+                                                  patch_scores=patch_keep_prob.cpu() if not args.topk_selection
+                                                  else None)
+
+        padded_cls_attns = []
+        for i, attn in enumerate(cls_attns):
+            if i < args.pruning_locs[0]:
+                B, H, N = attn[:, :, 1:].shape
+                padded_cls_attns.append(attn.unsqueeze(1))
             else:
-                test_logits, cls_attns, final_policy = model(mask_test_imgs.clone())
-            test_preds = torch.argmax(test_logits, dim=1)
+                B, H, N_kept = attn[:, :, 1:].shape
+                padded_attn = torch.cat((attn, torch.zeros((B, H, N - N_kept),
+                                                           device=attn.device, dtype=attn.dtype)), dim=2)
+                padded_cls_attns.append(padded_attn.unsqueeze(1))
 
-            kept_token_idx = getattr(model, "kept_token_indices")
-            dropped_token_idx = getattr(model, "dropped_token_indices")
-            token_idx = torch.cat((kept_token_idx, dropped_token_idx), dim=1)
-
-            keep_mask = torch.ones_like(kept_token_idx)
-            drop_mask = torch.zeros_like(dropped_token_idx)
-            sorted_patch_drop_mask = torch.cat((keep_mask, drop_mask), dim=1)
-            patch_drop_mask = torch.empty_like(sorted_patch_drop_mask)
-            patch_drop_mask.scatter_(dim=1, index=token_idx.long(), src=sorted_patch_drop_mask).unsqueeze(-1)
-            if not args.topk_selection:
-                patch_keep_prob = torch.exp(getattr(model, 'current_score')[:, :, 0])
-            # only display result after last predictor stage
-            attention_segmentation.display_patch_drop(mask_test_imgs.cpu(), patch_drop_mask.cpu(), args, epoch,
-                                                      (test_preds == mask_test_labels).cpu().numpy(),
-                                                      patch_indices=[kept_token_idx.cpu(), dropped_token_idx.cpu()],
-                                                      patch_scores=patch_keep_prob.cpu() if not args.topk_selection
-                                                      else None)
-
-            padded_cls_attns = []
-            for i, attn in enumerate(cls_attns):
-                if i < args.pruning_locs[0]:
-                    B, H, N = attn[:, :, 1:].shape
-                    padded_cls_attns.append(attn.unsqueeze(1))
-                else:
-                    B, H, N_kept = attn[:, :, 1:].shape
-                    padded_attn = torch.cat((attn, torch.zeros((B, H, N-N_kept),
-                                                               device=attn.device, dtype=attn.dtype)), dim=2)
-                    padded_cls_attns.append(padded_attn.unsqueeze(1))
-
-            # concatenate the list of class attentions after each encoder layer
-            # permute layer and batch dimension, such that we can visualize the evolution of the CLS token for the same
-            # image across all layers in one picture and loop over the batch dimension to plot this picture for every
-            # input image in the batch
-            cls_attns = torch.cat(padded_cls_attns, dim=1)  # (B, L, H, N+1)
-            for b in range(cls_attns.shape[0]):
-                attention_segmentation.visualize_heads(mask_test_imgs[b].cpu(), args, epoch + 1,
-                                                       [kept_token_idx.cpu(), dropped_token_idx.cpu()],
-                                                       cls_attns[b].cpu(), b)
-
-    time_elapsed = time.time() - since
-    if args.is_sbatch and args.wandb:
-        wandb.run.summary["best_accuracy"] = best_acc
-    print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
-    print(f'Best val acc: {best_acc:4f}')
+        # concatenate the list of class attentions after each encoder layer
+        # permute layer and batch dimension, such that we can visualize the evolution of the CLS token for the same
+        # image across all layers in one picture and loop over the batch dimension to plot this picture for every
+        # input image in the batch
+        cls_attns = torch.cat(padded_cls_attns, dim=1)  # (B, L, H, N+1)
+        for b in range(cls_attns.shape[0]):
+            attention_segmentation.visualize_heads(test_imgs[b].cpu(), args, current_epoch + 1,
+                                                   [kept_token_idx.cpu(), dropped_token_idx.cpu()],
+                                                   cls_attns[b].cpu(), b)
 
 #######################################################################################################################
 
@@ -286,16 +246,16 @@ if __name__ == '__main__':
     if args.is_sbatch:
         args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
-        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor/'
-        # if not args.topk_selection:
-        #     if args.use_ratio_loss and args.use_token_dist_loss:
-        #         args.patch_selection_method += 'with_kept_token_ratio_and_kept_token_kl_loss/'
-        #     elif args.use_ratio_loss:
-        #         args.patch_selection_method += 'with_kept_token_ratio_loss/'
-        #     elif args.use_token_dist_loss:
-        #         args.patch_selection_method += 'with_kept_token_kl_loss/'
+        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor'
+        if args.topk_selection:
+            if args.random_drop:
+                args.patch_selection_method += '_random_drop/'
+            else:
+                args.patch_selection_method += f"{'_mean_heads' if args.mean_heads else '_max_heads'}/"
+        else:
+            args.patch_selection_method = '/'
 
-        args.job_name = args.patch_selection_method + \
+        args.job_name = 'GT_' + args.patch_selection_method + \
                         f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
                         f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}' \
                         # f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
@@ -351,14 +311,13 @@ if __name__ == '__main__':
         args_dict = vars(args)
         sorted_keys = sorted(args_dict.keys(), key=lambda x: x.lower())
         for i, key in enumerate(sorted_keys):
-            if i % 5 == 0:
-                print('\n     ', end='')
-            print(f'{key}: {args_dict[key]}', end=',      ')
+            print(f'{key}: {args_dict[key]}')
         print('\n')
 
         # get the model specified as argument
         student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection, early_exit=args.early_exit)
+                                                        topk_selection=args.topk_selection, early_exit=args.early_exit,
+                                                        mean_heads=args.mean_heads, random_drop=args.random_drop)
         parameter_group = utils.get_param_groups(student, args)
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
@@ -372,18 +331,13 @@ if __name__ == '__main__':
         #    param.requires_grad = False
 
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
-        optimizer = torch.optim.AdamW(parameter_group, **opt_args)
+        optim = torch.optim.AdamW(parameter_group, **opt_args)
 
         criterion = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
                                                   ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
                                                   pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
                                                   base_criterion=torch.nn.CrossEntropyLoss(),
                                                   softmax_temp=args.softmax_temp, early_exit=args.early_exit)
-
-        #cosine_lr_scheduler = CosineLRScheduler(optimizer, t_initial=30, lr_min=1e-5, decay_rate=0.1, warmup_t=5,
-        #                                        warmup_lr_init=1e-6)
-        # cuda automatic mixed precision grad scaler
-        #grad_scaler = GradScaler()
 
         data = {x: datasets.ImageFolder(data_dir, transform=data_transforms[x])
                 for x in ['train', 'val']}
@@ -411,11 +365,14 @@ if __name__ == '__main__':
                         for x in ['train', 'val']}
 
         #print(indices[split - 64:split])
-        mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814, 7516, 18679, 17954, 961,
-                             30928, 1791, 48390, 4393, 22823, 40143, 24015, 25804, 5749, 35437, 25374, 11547, 32996,
-                             39908, 18314, 49925, 4262, 46756, 1800, 18519, 35824, 40151, 22328, 49239, 33673, 32273,
-                             34145, 9233, 44244, 29239, 17202, 42408, 46840, 40110, 48482, 38854, 6942, 35047, 29507,
-                             33984, 47733, 5325, 29598, 43515, 15832, 37692, 26859, 28567, 25079, 18707, 15200, 5857]
+        mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814,
+                             7516, 18679, 17954, 961, 30928, 1791, 48390, 4393,
+                             22823, 40143, 24015, 25804, 5749, 35437, 25374, 11547,
+                             32996, 39908, 18314, 49925, 4262, 46756, 1800, 18519,
+                             35824, 40151, 22328, 49239, 33673, 32273, 34145, 9233,
+                             44244, 29239, 17202, 42408, 46840, 40110, 48482, 38854,
+                             6942, 35047, 29507, 33984, 47733, 5325, 29598, 43515,
+                             15832, 37692, 26859, 28567, 25079, 18707, 15200, 5857]
 
         mask_test_dataset = Subset(data['val'], mask_test_indices)
         mask_test_data_loader = DataLoader(mask_test_dataset, batch_size=args.batch_size)
@@ -423,7 +380,6 @@ if __name__ == '__main__':
         mask_test_imgs, mask_test_labels = mask_test_data[0][:16], mask_test_data[1][:16]
         mask_test_imgs = mask_test_imgs.to(args.device)
         mask_test_labels = mask_test_labels.to(args.device)
-        #print(mask_test_labels.data)
 
         if args.use_dp:
             student = MyDataParallel(student)
@@ -433,8 +389,56 @@ if __name__ == '__main__':
         teacher = teacher.to(args.device)
 
         print(f"Start training for {args.epochs} epochs, with batch size of {args.batch_size}")
-        train_model(args, student, criterion, optimizer, mask_test_imgs, mask_test_labels)
 
-    print(f'Finished {"distributed data parallel" if args.use_ddp else "single GPU"} training of {args.epochs} epochs '
-          f'with batch size {args.batch_size} after {(time.time()-training_start)/60:3.2f} minutes')
+        since = time.time()
+        best_acc = 0.0
+
+        for epoch in range(args.epochs):
+            print('Epoch {}/{}'.format(epoch + 1, args.epochs))
+            print('-' * 50)
+
+            epoch_metrics = {}
+
+            if args.random_drop:
+                # evaluate for one epoch and exit training loop when using random patch drop
+                val_metrics = evaluate(args, student, teacher, data_loaders['val'])
+                visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels)
+                epoch_metrics = val_metrics
+                best_acc = epoch_metrics['val_acc']
+
+                if args.is_sbatch and args.wandb:
+                    # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
+                    wandb.log(epoch_metrics)
+
+                print(f'Stopping training after 1 epoch because using random patch drop')
+                break
+
+            warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
+            utils.adjust_learning_rate(optim.param_groups, args, epoch,
+                                       warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
+            if args.topk_selection:
+                # linearly decay sigma of top-k module during training
+                student.current_sigma = args.current_sigma
+
+            train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'], criterion, optim)
+            val_metrics = evaluate(args, student, teacher, data_loaders['val'])
+            visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels)
+
+            epoch_metrics = dict(train_metrics, **val_metrics)
+            if epoch_metrics['val_acc'] > best_acc:
+                best_acc = epoch_metrics['val_acc']
+
+            if args.is_sbatch and args.wandb:
+                # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
+                wandb.log(epoch_metrics)
+
+
+        time_elapsed = time.time() - since
+        if args.is_sbatch and args.wandb:
+            wandb.run.summary["best_accuracy"] = best_acc
+        print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
+        print(f'Best val acc: {best_acc:4f}')
+
+    # print(f'Finished {"distributed data parallel" if args.use_ddp else "single GPU"} training of {args.epochs} epochs '
+    #       f'with batch size {args.batch_size} after {(time.time()-training_start)/60:3.2f} minutes')
 

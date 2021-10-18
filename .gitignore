@@ -3,6 +3,7 @@ sbatch_log/
 runs/
 slurm_run.sh
 wandb/
+*.npy
 .idea/*
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template

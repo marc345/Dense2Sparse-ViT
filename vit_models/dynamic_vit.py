@@ -244,8 +244,8 @@ class Block(nn.Module):
     def forward(self, x, policy=None, return_cls_attn=False):
         if return_cls_attn:
             # return cls_attn in case the patch selection is based upon it and not on scores from the predictor modules
-            x_attn, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
-            x = x + self.drop_path(x_attn)
+            y, cls_attn = self.attn(self.norm1(x), policy=policy, return_cls_attn=True)
+            x = x + self.drop_path(y)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x, cls_attn
         else:
@@ -393,7 +393,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
-                 topk_selection=False, early_exit=False):
+                 topk_selection=False, early_exit=False, mean_heads=False, random_drop=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -461,10 +461,6 @@ class VisionTransformerDiffPruning(nn.Module):
         self.score_predictor = nn.ModuleList(predictor_list)
 
         ########################################  DYNAMIC VIT MODIFICATONS #############################################
-        # a list of the sorted patch indices (before dropping and based on the original token sequence length) where
-        # sorting was done based on the prediction modules scores in descending order
-        # len --> number of prediction modules
-        self.sorted_patch_indices = []
         # the number of kept tokens during training at each prediction module
         self.num_kept_tokens = []
 
@@ -474,6 +470,9 @@ class VisionTransformerDiffPruning(nn.Module):
         self.topk_selection = topk_selection
         if self.topk_selection:
             self.current_sigma = 0.05
+        self.mean_heads = mean_heads
+
+        self.random_drop = random_drop
 
         self.current_score = None
 
@@ -519,7 +518,7 @@ class VisionTransformerDiffPruning(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, stacked_cls_attn_weights=None):
         x = self.patch_embed(x)
         B, N, D = x.shape
 
@@ -534,35 +533,62 @@ class VisionTransformerDiffPruning(nn.Module):
         prev_decision = torch.ones(B, init_n, 1, dtype=x.dtype, device=x.device)
         policy = torch.ones(B, init_n + 1, 1, dtype=x.dtype, device=x.device)
 
-        self.sorted_patch_indices = []
         self.num_kept_tokens = []
         self.cls_attns = []
         self.dropped_token_indices = None
         self.kept_token_indices = torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
 
         for i, blk in enumerate(self.blocks):
+            ############################################################################################################
+            ########################################## PRUNING ENCODER LAYER ###########################################
+            ############################################################################################################
             # at a layer where pruning happens
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]  # shape: (B, N, D)
+                ########################################################################################################
+                ################################### TOP-K SCORE GENERATION #############################################
+                ########################################################################################################
                 if self.topk_selection:
-                    # take max attention weight across all heads from CLS token for each patch
-                    max_cls_attn = torch.max(current_cls_attn[:, :, 1:], dim=1)[0]
-
-                    pred_score = self.score_predictor[p_count](max_cls_attn, current_sigma=self.current_sigma)  # (B, K, N)
+                    if stacked_cls_attn_weights is not None:
+                        # sum weights across all layers and normalize with number of layers
+                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
+                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
+                        if self.mean_heads:
+                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
+                        else:
+                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](cls_attn_weights,
+                                                                   current_sigma=self.current_sigma)  # (B, K, N)
+                    else:
+                        # take max attention weight across all heads from CLS token for each patch
+                        if self.mean_heads:
+                            current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                        else:
+                            current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](current_cls_attn,
+                                                                   current_sigma=self.current_sigma)  # (B, K, N)
+                ########################################################################################################
+                ############################### DYNAMIC VIT SCORE GENERATION ###########################################
+                ########################################################################################################
                 else:
-                    # current_cls_attn.shape: (B, H, N+1)
-                    # current_cls_attn[:, :, 1:].permute(0, 2, 1)
-                    if self.early_exit:
-                        # pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision,
-                        #                                            cls_attn=current_cls_attn[:, :, 1:]).reshape(B, -1, 2)
-                        early_exit_cls = x[:, 0]
-                        pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
+                    if stacked_cls_attn_weights is not None:
+                        # sum weights across all layers and normalize with number of layers
+                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
+                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
+                        if self.mean_heads:
+                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
+                        else:
+                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
+                        pred_score = self.score_predictor[p_count](cls_attn_weights[:, :, 1:].permute(0, 2, 1),
                                                                    policy=prev_decision).reshape(B, -1, 2)
                     else:
                         # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
                         #                                            policy=prev_decision).reshape(B, -1, 2)
                         pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision).reshape(B, -1, 2)
                     self.current_score = pred_score.detach().clone()
+                ########################################################################################################
+                ################################### PRUNING DURING TRAINING ############################################
+                ########################################################################################################
                 if self.training:
                     if self.topk_selection:
                         cls_x = x[:, 0:1]
@@ -582,6 +608,9 @@ class VisionTransformerDiffPruning(nn.Module):
                         # x, self.current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                         x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
                         prev_decision = hard_keep_decision
+                ########################################################################################################
+                ################################## PRUNING DURING INFERENCE ############################################
+                ########################################################################################################
                 # during inference return just the patches with the highest scores
                 else:
                     if self.topk_selection:
@@ -589,8 +618,18 @@ class VisionTransformerDiffPruning(nn.Module):
                     else:
                         score = pred_score[:, :, 0]
                     num_keep_node = int(init_n * self.token_ratio[p_count])
-                    keep_policy = torch.argsort(score, dim=1, descending=True)
-                    # self.sorted_patch_indices.append(keep_policy.detach())
+                    if self.random_drop:
+                        # randomly drop patches
+                        # random shuffle of keep policy for each image in the batch
+                        idxs = []
+                        for b in range(keep_policy.shape[0]):
+                            idxs.append(torch.randperm(N))
+                        idxs = torch.stack(idxs, dim=0).to(keep_policy.device)
+                        # keep_policy = torch.gather(index=idxs, input=keep_policy, dim=1)
+                        keep_policy = idxs
+                    else:
+                        # sort score in descending order and take top most according to keep ratio
+                        keep_policy = torch.argsort(score, dim=1, descending=True)
                     drop_policy = keep_policy.detach().clone()[:, num_keep_node:]
                     keep_policy = keep_policy[:, :num_keep_node]
                     now_dropped_indices = torch.gather(self.kept_token_indices, index=drop_policy, dim=1)
@@ -607,7 +646,9 @@ class VisionTransformerDiffPruning(nn.Module):
                     prev_decision = torch.gather(input=prev_decision, dim=1, index=keep_policy.unsqueeze(-1))
                     x, current_cls_attn = blk(x, return_cls_attn=True)
                 p_count += 1
-            # for every other layer
+            ############################################################################################################
+            ######################################## NON-PRUNING ENCODER LAYER #########################################
+            ############################################################################################################
             else:
                 if self.training:
                     if self.topk_selection:
@@ -751,6 +792,23 @@ class VisionTransformerTeacher(nn.Module):
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+    def forward_cls_attention(self, x):
+        B = x.shape[0]
+        x = self.patch_embed(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        cls_attn_weights = []
+        for i, blk in enumerate(self.blocks):
+            x, cls_attns = blk(x, return_cls_attn=True)
+            cls_attn_weights.append(cls_attns.detach())
+
+        return torch.stack(cls_attn_weights, dim=1)
+
 
     def forward(self, x, return_final_cls_attn=False):
         B = x.shape[0]

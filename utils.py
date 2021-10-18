@@ -84,7 +84,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     else:
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
-    lr_info = f'### Using lr  {backbone_lr:.7f}% for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR'
+    lr_info = f'### Using lr  {backbone_lr:.7f} for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR'
     if args.topk_selection:
         lr_info += f', current sigma = {args.current_sigma:.7f} for TOP-K'
     if args.early_exit:
@@ -160,6 +160,11 @@ def parse_args():
     parser.add_argument('--topk-selection', action='store_true', default=False,
                         help='Selection of important patches based on differentiable patch selection for image '
                              'classification paper')
+    parser.add_argument('--mean-heads', action='store_true', default=False,
+                        help='Whether to take the mean of the CLS attention weights across all heads, defaults to false'
+                             'which will use the max across heads')
+    parser.add_argument('--random-drop', action='store_true', default=False,
+                        help='Drop patches randomly without respecting any score')
     parser.add_argument('--initial-sigma',
                         help='Inital value of sigma for the perturbation noise of the differential top-k module',
                         default=0.05, type=float)

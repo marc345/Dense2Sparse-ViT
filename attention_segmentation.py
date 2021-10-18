@@ -187,26 +187,26 @@ def save_image_grid(num_rows, num_cols, images, args, epoch_num, patch_scores=No
     plt.subplots_adjust(left=0.1, bottom=0.1, right=0.87, top=0.9, wspace=0.1, hspace=0.1)
 
     if display_segmentation:
-        fig.suptitle(f'Epoch {epoch_num+1}\n'
+        fig.suptitle(f'Epoch {epoch_num}\n'
                      f'{"With Jaccard index between kept patches and attention segmentation mask" if display_segmentation else ""}', fontsize=28)
-        plt.savefig(f'{save_path}/images_patch_drop_and_attn_segmentation_{epoch_num+1}_epoch.jpg')
+        plt.savefig(f'{save_path}/images_patch_drop_and_attn_segmentation_{epoch_num}_epoch.jpg')
     elif save_raw:
         fig.suptitle('Unmodified Images', fontsize=12)
         plt.savefig(f'{save_path}/images_raw.jpg')
     else:
-        suptitle_str = f'Epoch: {epoch_num+1}, validation accuracy: {args.epoch_acc:.4f}, ' \
+        suptitle_str = f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}, ' \
                        f'using {"perturbed top-k" if args.topk_selection else "gumbel softmax"} predictor\n' \
                        f'Pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}], ' \
                        f'with keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}] '
-        if args.topk_selection:
+        if args.topk_selection and hasattr(args, 'current_sigma'):
             suptitle_str += f' current sigma: {args.current_sigma:.4f}'
         fig.suptitle(suptitle_str, fontsize=12)
         # f'{"applying attention masking" if not args.zero_drop else "setting discarded patches to zero"}',
         # f'Selecting patches based on {"predictor scores" if not args.attn_selection else "CLS token attention weights"}, '
         if head is not None:
-            fname = f'images_final_cls_attn_{epoch_num+1}_head{head}.jpg'
+            fname = f'images_final_cls_attn_{epoch_num}_head{head}.jpg'
         else:
-            fname = f'images_patch_drop_{epoch_num+1}.jpg'
+            fname = f'images_patch_drop_{epoch_num}.jpg'
         plt.savefig(f"{save_path}/{fname}")
 
     plt.close()
@@ -322,13 +322,13 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     cbar.ax.tick_params(labelsize=14)
 
     suptitle_str = f'CLS token attention weights evolution through ViT layers\n' \
-                   f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f}, ' \
-                   f'sing {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor and ' \
-                   f'pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}] with ' \
+                   f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f} | ' \
+                   f'using {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor | ' \
+                   f'pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}] | ' \
                    f'keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
-    if args.topk_selection:
-        suptitle_str += f' & current sigma of {args.current_sigma:.7f}'
-    fig.suptitle(suptitle_str, fontsize=20, y=0.99)
+    if args.topk_selection and hasattr(args, 'current_sigma'):
+        suptitle_str += f' | current sigma of {args.current_sigma:.7f}'
+    fig.suptitle(suptitle_str, fontsize=18, y=0.99)
 
     fig.subplots_adjust(left=0.01, bottom=0.11, right=0.99, top=0.90)
 
