@@ -533,7 +533,6 @@ class VisionTransformerDiffPruning(nn.Module):
         prev_decision = torch.ones(B, init_n, 1, dtype=x.dtype, device=x.device)
         policy = torch.ones(B, init_n + 1, 1, dtype=x.dtype, device=x.device)
 
-        self.sorted_patch_indices = []
         self.num_kept_tokens = []
         self.cls_attns = []
         self.dropped_token_indices = None
