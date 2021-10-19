@@ -549,6 +549,7 @@ class VisionTransformerDiffPruning(nn.Module):
                 ################################### TOP-K SCORE GENERATION #############################################
                 ########################################################################################################
                 if self.topk_selection:
+                    ################## USE CLS ATTENTION WEIGHTS FROM TEACHER AS PATCH IMPORTANCE METRIC ###############
                     if stacked_cls_attn_weights is not None:
                         # sum weights across all layers and normalize with number of layers
                         cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
@@ -559,18 +560,25 @@ class VisionTransformerDiffPruning(nn.Module):
                             cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
                         pred_score = self.score_predictor[p_count](cls_attn_weights,
                                                                    current_sigma=self.current_sigma)  # (B, K, N)
+                    #### USE OWN CLS ATTENTION WEIGHTS (FROM LAYER BEFORE PRUNING LAYER) AS PATCH IMPORTANCE METRIC ####
                     else:
-                        # take max attention weight across all heads from CLS token for each patch
-                        if self.mean_heads:
-                            current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                        if self.random_drop and i == 0:
+                            # dummy pred score in case no CLS attention weights are available (because we prune before
+                            # the 1st layer) --> only possible for random patch drop as the score is not used either way
+                            pred_score = torch.zeros((B, N), device=spatial_x.device)
                         else:
-                            current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
-                        pred_score = self.score_predictor[p_count](current_cls_attn,
-                                                                   current_sigma=self.current_sigma)  # (B, K, N)
+                            # take max attention weight across all heads from CLS token for each patch
+                            if self.mean_heads:
+                                current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                            else:
+                                current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
+                            pred_score = self.score_predictor[p_count](current_cls_attn,
+                                                                       current_sigma=self.current_sigma)  # (B, K, N)
                 ########################################################################################################
                 ############################### DYNAMIC VIT SCORE GENERATION ###########################################
                 ########################################################################################################
                 else:
+                    ################## USE CLS ATTENTION WEIGHTS FROM TEACHER AS PATCH IMPORTANCE METRIC ###############
                     if stacked_cls_attn_weights is not None:
                         # sum weights across all layers and normalize with number of layers
                         cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
@@ -581,6 +589,7 @@ class VisionTransformerDiffPruning(nn.Module):
                             cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
                         pred_score = self.score_predictor[p_count](cls_attn_weights[:, :, 1:].permute(0, 2, 1),
                                                                    policy=prev_decision).reshape(B, -1, 2)
+                    #### USE OWN CLS ATTENTION WEIGHTS (FROM LAYER BEFORE PRUNING LAYER) AS PATCH IMPORTANCE METRIC ####
                     else:
                         # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
                         #                                            policy=prev_decision).reshape(B, -1, 2)
@@ -590,6 +599,7 @@ class VisionTransformerDiffPruning(nn.Module):
                 ################################### PRUNING DURING TRAINING ############################################
                 ########################################################################################################
                 if self.training:
+                    ########### PATCH DROP VIA INDICATOR (WEIGHTED AVERAGE OF MOST IMPORTANT PATCHES) MAT MULT #########
                     if self.topk_selection:
                         cls_x = x[:, 0:1]
                         # multiply transposed indicators with tokens to obtain differentiable topK selection
@@ -597,7 +607,8 @@ class VisionTransformerDiffPruning(nn.Module):
                         spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
                         # always keep cls token
                         x = torch.cat((cls_x, spatial_x), dim=1)
-                        x = blk(x)
+                        x, current_cls_attn = blk(x, return_cls_attn=True)
+                    ############# PATCH DROP VIA MASKED SELF ATTENTION WITH POLICY (SEE DYNAMIC VIT PAPER) #############
                     else:
                         hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
                         self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision.detach(), dim=1)/
@@ -613,23 +624,28 @@ class VisionTransformerDiffPruning(nn.Module):
                 ########################################################################################################
                 # during inference return just the patches with the highest scores
                 else:
-                    if self.topk_selection:
-                        score = pred_score
-                    else:
-                        score = pred_score[:, :, 0]
-                    num_keep_node = int(init_n * self.token_ratio[p_count])
+                    ########################### RANDOM DROP: RANDOMLY SELECT INDICES OF KEPT TOKENS ####################
                     if self.random_drop:
                         # randomly drop patches
                         # random shuffle of keep policy for each image in the batch
                         idxs = []
-                        for b in range(keep_policy.shape[0]):
+                        for b in range(B):
                             idxs.append(torch.randperm(N))
-                        idxs = torch.stack(idxs, dim=0).to(keep_policy.device)
+                        idxs = torch.stack(idxs, dim=0).to(spatial_x.device)
                         # keep_policy = torch.gather(index=idxs, input=keep_policy, dim=1)
                         keep_policy = idxs
-                    else:
+                    elif self.topk_selection:
+                        score = pred_score
                         # sort score in descending order and take top most according to keep ratio
                         keep_policy = torch.argsort(score, dim=1, descending=True)
+                    else:
+                        score = pred_score[:, :, 0]
+                        # sort score in descending order and take top most according to keep ratio
+                        keep_policy = torch.argsort(score, dim=1, descending=True)
+
+                    # determine number of kept tokens according to keep ratio and number of total tokens
+                    num_keep_node = int(init_n * self.token_ratio[p_count])
+
                     drop_policy = keep_policy.detach().clone()[:, num_keep_node:]
                     keep_policy = keep_policy[:, :num_keep_node]
                     now_dropped_indices = torch.gather(self.kept_token_indices, index=drop_policy, dim=1)
