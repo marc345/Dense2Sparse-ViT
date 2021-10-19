@@ -143,7 +143,7 @@ def parse_args():
     parser.add_argument('--pruning-locs', nargs='+', help='Locations of the prediction modules in the encoder layer',
                         default=[3], type=int)
     parser.add_argument('--keep-ratios', nargs='+', help='Keeping ratios of the prediction modules', type=float,
-                        default=[0.35])
+                        default=[0.3])
     parser.add_argument('--softmax-temp',
                         help='Temperature value used for the softmax functions in the distillation loss parts',
                         default=1.0, type=float)
