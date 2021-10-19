@@ -96,9 +96,14 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
         train_inputs = train_inputs.to(args.device)
         train_labels = train_labels.to(args.device)
 
-        cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
-        # forward
-        outputs = model(train_inputs.clone(), cls_attn_weights)
+        if args.cls_from_teacher:
+            cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
+            # forward with CLS attention weights from unpruned teacher network
+            outputs = model(train_inputs.clone(), cls_attn_weights)
+        else:
+            # forward
+            outputs = model(train_inputs.clone())
+
         # zero the parameter gradients
         optimizer.zero_grad()
         train_loss = loss_function(train_inputs, outputs, train_labels)
@@ -151,9 +156,12 @@ def evaluate(args, model, teacher_model, val_data_loader):
         val_inputs = val_inputs.to(args.device)
         val_labels = val_labels.to(args.device)
 
-        cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
+        if not args.random_drop and args.cls_from_teacher:
+            cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
+            outputs = model(val_inputs.clone(), cls_attn_weights)
+        else:
+            outputs = model(val_inputs.clone())
 
-        outputs = model(val_inputs.clone(), cls_attn_weights)
         logits, _, _ = outputs
 
         loss = F.cross_entropy(logits, val_labels)
@@ -177,9 +185,12 @@ def evaluate(args, model, teacher_model, val_data_loader):
 def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
     model.eval()
     with torch.no_grad():
-        cls_attn_weights = teacher_model.forward_cls_attention(test_imgs.clone())  # (B, L, H, N+1)
-        model.eval()
-        test_logits, cls_attns, final_policy = model(test_imgs.clone(), cls_attn_weights)
+        if not args.random_drop and args.cls_from_teacher:
+            cls_attn_weights = teacher_model.forward_cls_attention(test_imgs.clone())  # (B, L, H, N+1)
+            test_logits, cls_attns, final_policy = model(test_imgs.clone(), cls_attn_weights)
+        else:
+            test_logits, cls_attns, final_policy = model(test_imgs.clone())
+
         test_preds = torch.argmax(test_logits, dim=1)
 
         kept_token_idx = getattr(model, "kept_token_indices")
@@ -202,6 +213,7 @@ def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
 
         padded_cls_attns = []
         for i, attn in enumerate(cls_attns):
+            N = int((mask_test_imgs.shape[-1] // args.patch_size)**2)
             if i < args.pruning_locs[0]:
                 B, H, N = attn[:, :, 1:].shape
                 padded_cls_attns.append(attn.unsqueeze(1))
@@ -398,20 +410,6 @@ if __name__ == '__main__':
             print('-' * 50)
 
             epoch_metrics = {}
-
-            if args.random_drop:
-                # evaluate for one epoch and exit training loop when using random patch drop
-                val_metrics = evaluate(args, student, teacher, data_loaders['val'])
-                visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels)
-                epoch_metrics = val_metrics
-                best_acc = epoch_metrics['val_acc']
-
-                if args.is_sbatch and args.wandb:
-                    # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
-                    wandb.log(epoch_metrics)
-
-                print(f'Stopping training after 1 epoch because using random patch drop')
-                break
 
             warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
             utils.adjust_learning_rate(optim.param_groups, args, epoch,

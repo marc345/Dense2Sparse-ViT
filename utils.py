@@ -173,5 +173,9 @@ def parse_args():
                              'only in combination with --topk-selection (otherwise the predictor network will be used).'
                              'Earliest possible pruning stage is at layer 1, since CLS token attention weights are '
                              'needed.')
+    parser.add_argument('--cls-from-teacher', action='store_true', default=False,
+                        help='Use CLS attention weights from teacher, this means passing the input images through the '
+                             'unpruned teacher network first to get the CLS token\'s attentions weight and using it'
+                             'as patch importance metric, e.g. selecting the K patches with the highest weights')
 
     return parser.parse_args()
