@@ -579,7 +579,7 @@ class VisionTransformerDiffPruning(nn.Module):
                             cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
                         else:
                             cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
-                        pred_score = self.score_predictor[p_count](cls_attn_weights[:, :, 1:].permute(0, 2, 1),
+                        pred_score = self.score_predictor[p_count](cls_attn_weights,
                                                                    policy=prev_decision).reshape(B, -1, 2)
                     else:
                         # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
