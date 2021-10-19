@@ -213,6 +213,7 @@ def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
 
         padded_cls_attns = []
         for i, attn in enumerate(cls_attns):
+            N = int((mask_test_imgs.shape[-1] // args.patch_size)**2)
             if i < args.pruning_locs[0]:
                 B, H, N = attn[:, :, 1:].shape
                 padded_cls_attns.append(attn.unsqueeze(1))
