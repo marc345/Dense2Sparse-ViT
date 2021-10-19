@@ -665,23 +665,15 @@ class VisionTransformerDiffPruning(nn.Module):
         x = x[:, 0]
         x = self.pre_logits(x)
         x = self.head(x)
-        if self.early_exit:
-            early_exit_output = self.early_exit_head(early_exit_cls)
         if self.training:
             if self.topk_selection:
                 return x, features
             if self.distill:
-                if self.early_exit:
-                    return x, early_exit_output, features, prev_decision.detach(), out_pred_prob
-                else:
-                    return x, features, prev_decision.detach(), out_pred_prob
+                return x, features, prev_decision.detach(), out_pred_prob
             else:
                 return x, out_pred_prob
         else:
-            if self.early_exit:
-                return x, early_exit_output, self.cls_attns, now_policy
-            else:
-                return x, self.cls_attns, now_policy
+            return x, self.cls_attns, now_policy
 
 
     def forward_cls_attn(self, x):
