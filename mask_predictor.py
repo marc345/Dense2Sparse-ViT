@@ -77,6 +77,36 @@ class MyDataParallel(torch.nn.DataParallel):
             return setattr(self.module, name, value)
 
 
+def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
+    """
+        input: cls_attns, (B, L, H, N+1) the CLS attention weights from the unpruned teacher network from all the
+               encoder layers and different attention heads
+        keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
+        mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
+                    across the attention heads
+    """
+    cls_attns = torch.mean(cls_attns, dim=1)
+    if mean_heads:
+        cls_attns = torch.mean(cls_attns, dim=1)
+    else:
+        cls_attns, _ = torch.max(cls_attns, dim=1)
+    cls_attns = cls_attns[:, 1:]
+
+    sort_idxs = torch.argsort(cls_attns, dim=-1, descending=True)
+
+    num_kept_tokens = int(cls_attns.shape[-1]*keep_ratio)
+    kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=cls_attns.device)
+    dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=cls_attns.device)
+    mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
+
+    mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
+
+    return mask
+
+
+
+
+
 #######################################################################################################################
 #######################################################################################################################
 # main training function
@@ -92,9 +122,9 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
 
     model.train()
 
-    for train_inputs, train_labels in tqdm(train_data_loader):
-        train_inputs = train_inputs.to(args.device)
-        train_labels = train_labels.to(args.device)
+    for i, train_data in enumerate(tqdm(train_data_loader)):
+        train_inputs = train_data[0].to(args.device)
+        train_labels = train_data[1].to(args.device)
 
         if args.cls_from_teacher:
             cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
@@ -106,10 +136,19 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
 
         # zero the parameter gradients
         optimizer.zero_grad()
-        train_loss = loss_function(train_inputs, outputs, train_labels)
+        # train_loss = loss_function(train_inputs, outputs, train_labels)
+        # train_loss.backward()
+
+        hard_keep_decisions = outputs[-1][0]
+        gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
+
+        train_loss = F.mse_loss(hard_keep_decisions, gt_patch_drop_mask, reduction='mean').float()
         train_loss.backward()
         optimizer.step()
         preds = torch.argmax(outputs[0].detach(), dim=1)
+
+        if i % 200 == 0:
+            print(f'training step_{i} loss (MSE): {train_loss.detach().item():.4f}')
 
         # statistics
         running_loss += train_loss.detach().item()
@@ -125,15 +164,15 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
     metrics["train_loss"] = running_loss / len(train_data_loader)  # batch_repeat_factor
     metrics["train_acc"] = float(running_acc) / (len(train_data_loader))  # batch_repeat_factor
 
-    metrics['cls_loss'] = loss_function.cls_loss / loss_function.count
-    metrics['cls_dist_loss'] = loss_function.cls_distill_loss / loss_function.count
-    if not args.topk_selection and args.use_ratio_loss:
-        metrics['ratio_loss'] = loss_function.ratio_loss / loss_function.count
-    if not args.topk_selection and args.use_token_dist_loss:
-        metrics['token_distill_loss'] = loss_function.token_distill_loss / loss_function.count
-    if not args.topk_selection:
-        metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
-        print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
+    # metrics['cls_loss'] = loss_function.cls_loss / loss_function.count
+    # metrics['cls_dist_loss'] = loss_function.cls_distill_loss / loss_function.count
+    # if not args.topk_selection and args.use_ratio_loss:
+    #     metrics['ratio_loss'] = loss_function.ratio_loss / loss_function.count
+    # if not args.topk_selection and args.use_token_dist_loss:
+    #     metrics['token_distill_loss'] = loss_function.token_distill_loss / loss_function.count
+    # if not args.topk_selection:
+    #     metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
+    #     print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
 
     print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}')
 
@@ -303,10 +342,11 @@ if __name__ == '__main__':
             data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
             # args.is_sbatch = True
         args.job_name = 'debug_job'
-        args.batch_size = 8
+        args.batch_size = 64
         args.epochs = 10
 
         args.topk_selection = False
+        args.attn_selection = False
         args.initial_sigma = 0.0005
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
@@ -331,6 +371,13 @@ if __name__ == '__main__':
                                                         topk_selection=args.topk_selection, early_exit=args.early_exit,
                                                         mean_heads=args.mean_heads, random_drop=args.random_drop)
         parameter_group = utils.get_param_groups(student, args)
+
+        # freeze whole model except predictor network
+        for n, p in student.named_parameters():
+            if 'predictor' in n:
+                p.requires_grad = True
+            else:
+                p.requires_grad = False
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()
@@ -363,7 +410,8 @@ if __name__ == '__main__':
 
         # overfit on a single batch for a debug (non sbatch submitted) job
         if not args.is_sbatch:
-            data_indices = {'train': indices[:args.batch_size], 'val': indices[:args.batch_size]}
+            # data_indices = {'train': indices[:args.batch_size], 'val': indices[:args.batch_size]}
+            data_indices = {'train': indices[split:], 'val': indices[:split]}
         else:
             data_indices = {'train': indices[split:], 'val': indices[:split]}
 
