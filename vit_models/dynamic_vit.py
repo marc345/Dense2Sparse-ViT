@@ -318,6 +318,24 @@ class HybridEmbed(nn.Module):
         return x
 
 
+class BatchNormLayer(nn.Module):
+    """
+        Batch norm layer including necessary transposing in forward pass
+        BatchNorm1d expects an input of shape either (B, C) or (B, C, L) and normalizes C across the batch dimension,
+        however the input to the predictor is the spatial token sequence of shape (B, N, D), so to use BatchNorm1d
+        we tranpose the input before and after applying the batch norm layer
+    """
+    def __init__(self, input_dim=384):
+        super().__init__()
+
+        self.bn = nn.BatchNorm1d(input_dim)
+
+    def forward(self, x):
+        x = torch.transpose(x, 1, 2)
+        x = self.bn(x)
+        x = torch.transpose(x, 1, 2)
+
+        return x
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
@@ -327,17 +345,111 @@ class PredictorLG(nn.Module):
         self.topk_selection = topk_selection
 
         if topk_selection and k is not None:
-            # self.out_conv = nn.Sequential(
-            #     nn.Linear(embed_dim, embed_dim // 2),
-            #     nn.GELU(),
-            #     nn.Linear(embed_dim // 2, embed_dim // 4),
-            #     nn.GELU(),
-            #     nn.Linear(embed_dim // 4, 1),
-            #     nn.Softmax(dim=-2)  # normalize patch scores
-            # )
+            self.act = nn.GELU()
+            self.flatten = nn.Flatten(start_dim=-2, end_dim=-1)
+            self.softmax = nn.Softmax(dim=-1)
+
+            if small_predictor:
+                # small input block with batch norm
+                self.in_conv_bn = nn.Sequential(
+                    BatchNormLayer(embed_dim),
+                    nn.Linear(embed_dim, embed_dim),
+                    self.act
+                )
+                # # small input block with layer norm
+                # self.in_conv = nn.Sequential(
+                #     nn.LayerNorm(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim),
+                #     nn.GELU()
+                # )
+
+                # small output block with batch norm
+                self.out_conv_bn = nn.Sequential(
+                    BatchNormLayer(embed_dim),
+                    nn.Linear(embed_dim, embed_dim//2),
+                    self.act,
+                    BatchNormLayer(embed_dim//2),
+                    nn.Linear(embed_dim//2, embed_dim//4),
+                    self.act,
+                    BatchNormLayer(embed_dim//4),
+                    nn.Linear(embed_dim//4, 1),
+                    nn.Flatten(start_dim=-2, end_dim=- 1),
+                    nn.Softmax(dim=-1)
+                )
+                # # small output block with layer norm
+                # self.out_conv = nn.Sequential(
+                #     nn.LayerNorm(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim // 2),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim // 2),
+                #     nn.Linear(embed_dim // 2, embed_dim // 4),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim // 4),
+                #     nn.Linear(embed_dim // 4, 1),
+                #     nn.Flatten(start_dim=-2, end_dim=- 1),
+                #     nn.Softmax(dim=-1)
+                # )
+            else:
+                # # large input block with batch norm
+                self.in_conv_bn = nn.Sequential(
+                    BatchNormLayer(embed_dim),
+                    nn.Linear(embed_dim, embed_dim*2),
+                    self.act,
+                    BatchNormLayer(embed_dim * 2),
+                    nn.Linear(embed_dim*2, embed_dim*2),
+                    self.act,
+                )
+                # large input block with layer norm
+                # self.in_conv = nn.Sequential(
+                #     nn.LayerNorm(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim * 2),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim * 2),
+                #     nn.Linear(embed_dim * 2, embed_dim * 2),
+                #     nn.GELU(),
+                # )
+                # large output block with batch norm
+                self.out_conv_bn = nn.Sequential(
+                    BatchNormLayer(embed_dim*2),
+                    nn.Linear(embed_dim*2, embed_dim*2),
+                    self.act,
+                    BatchNormLayer(embed_dim*2),
+                    nn.Linear(embed_dim*2, embed_dim),
+                    self.act,
+                    BatchNormLayer(embed_dim),
+                    nn.Linear(embed_dim, embed_dim//2),
+                    self.act,
+                    BatchNormLayer(embed_dim//2),
+                    nn.Linear(embed_dim//2, embed_dim//4),
+                    self.act,
+                    BatchNormLayer(embed_dim//4),
+                    nn.Linear(embed_dim//4, 1),
+                    nn.Flatten(start_dim=-2, end_dim=- 1),
+                    nn.Softmax(dim=1)
+                )
+                # # large output block with layer norm
+                # self.out_conv = nn.Sequential(
+                #     nn.LayerNorm(embed_dim * 2),
+                #     nn.Linear(embed_dim * 2, embed_dim * 2),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim * 2),
+                #     nn.Linear(embed_dim * 2, embed_dim),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim // 2),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim // 2),
+                #     nn.Linear(embed_dim // 2, embed_dim // 4),
+                #     nn.GELU(),
+                #     nn.LayerNorm(embed_dim // 4),
+                #     nn.Linear(embed_dim // 4, 1),
+                #     nn.Flatten(start_dim=-2, end_dim=- 1),
+                #     nn.Softmax(dim=1)
+                # )
+
             self.topk = PerturbedTopK(k)
         elif only_cls_features:
-            self.out_conv = nn.Sequential(
+            self.out_conv_bn = nn.Sequential(
                 nn.Linear(6, 32),
                 nn.GELU(),
                 nn.Linear(32, 32),
@@ -346,19 +458,38 @@ class PredictorLG(nn.Module):
                 nn.LogSoftmax(dim=-1)
             )
         else:
-            self.in_conv = nn.Sequential(
-                nn.LayerNorm(embed_dim),
-                nn.Linear(embed_dim, embed_dim),
-                nn.GELU()
-            )
-            self.out_conv = nn.Sequential(
-                nn.Linear(embed_dim, embed_dim // 2),
-                nn.GELU(),
-                nn.Linear(embed_dim // 2, embed_dim // 4),
-                nn.GELU(),
-                nn.Linear(embed_dim // 4, 2),
-                nn.LogSoftmax(dim=-1)
-            )
+            if small_predictor:
+                self.in_conv = nn.Sequential(
+                   nn.LayerNorm(embed_dim),
+                   nn.Linear(embed_dim, embed_dim),
+                   nn.GELU()
+                )
+                self.out_conv = nn.Sequential(
+                   nn.Linear(embed_dim, embed_dim // 2),
+                   nn.GELU(),
+                   nn.Linear(embed_dim // 2, embed_dim // 4),
+                   nn.GELU(),
+                   nn.Linear(embed_dim // 4, 2)
+                )
+            else:
+                self.in_conv = nn.Sequential(
+                    nn.LayerNorm(embed_dim),
+                    nn.Linear(embed_dim, embed_dim * 2),
+                    nn.GELU(),
+                    nn.Linear(embed_dim * 2, embed_dim * 2),
+                    nn.GELU(),
+                )
+                self.out_conv = nn.Sequential(
+                    nn.Linear(embed_dim * 2, embed_dim * 2),
+                    nn.GELU(),
+                    nn.Linear(embed_dim * 2, embed_dim),
+                    nn.GELU(),
+                    nn.Linear(embed_dim, embed_dim // 2),
+                    nn.GELU(),
+                    nn.Linear(embed_dim // 2, embed_dim // 4),
+                    nn.GELU(),
+                    nn.Linear(embed_dim // 4, 2),
+                )
 
 
     def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
