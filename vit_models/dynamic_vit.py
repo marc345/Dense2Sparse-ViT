@@ -336,13 +336,18 @@ class BatchNormLayer(nn.Module):
         x = torch.transpose(x, 1, 2)
 
         return x
+
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False):
+    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False, small_predictor=False):
         super().__init__()
 
+        self.small_predictor = small_predictor
+        self.k = k
         self.topk_selection = topk_selection
+        self.fwd_start = torch.cuda.Event(enable_timing=True)
+        self.fwd_end = torch.cuda.Event(enable_timing=True)
 
         if topk_selection and k is not None:
             self.act = nn.GELU()
@@ -493,11 +498,29 @@ class PredictorLG(nn.Module):
 
 
     def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
+        self.fwd_start.record()
         if self.topk_selection:
+            x = self.in_conv_bn(x)
+            # x = self.in_conv(x)
+
+            B, N, C = x.size()  # C
+            local_x = x[:, :, :C // 2]
+            global_x = torch.mean(x[:, :, C // 2:], dim=1, keepdim=True)
+            x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
+            scores = self.out_conv_bn(x)
+            # scores = self.out_conv(x)
+
+            # logits = self.out_conv_bn(x)
+            # probs = F.softmax(logits, dim=-1)
+            # scores = F.softmax(probs[:, :, 1], dim=-1)
+
             if self.training:
-                return self.topk(x, current_sigma=current_sigma)
+                topk_scores = torch.topk(scores, self.k, dim=-1)[1]#self.topk(scores, current_sigma=current_sigma)self.topk(scores, current_sigma=current_sigma)#
+                self.fwd_end.record()
+                return scores, topk_scores
             else:
-                return x
+                self.fwd_end.record()
+                return scores, scores
         else:
             x = self.in_conv(x)
             B, N, C = x.size()  # C
