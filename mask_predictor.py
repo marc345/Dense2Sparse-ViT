@@ -373,11 +373,13 @@ if __name__ == '__main__':
         parameter_group = utils.get_param_groups(student, args)
 
         # freeze whole model except predictor network
-        for n, p in student.named_parameters():
-            if 'predictor' in n:
-                p.requires_grad = True
-            else:
-                p.requires_grad = False
+        if args.freeze_backbone:
+            print(f'Freezing whole student, except predictor network')
+            for n, p in student.named_parameters():
+                if 'predictor' in n:
+                    p.requires_grad = True
+                else:
+                    p.requires_grad = False
 
         teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()

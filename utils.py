@@ -151,10 +151,13 @@ def parse_args():
                         help='Whether to use the kept token ratio loss')
     parser.add_argument('--ratio-weight', help='Scale of the kept token ratio in the dynamic ViT loss function',
                          default=2.0, type=float)
-    parser.add_argument('--dist-weight', help='Scale of the distillation party in the dynamic ViT loss function',
-                        default=0.5, type=float)
     parser.add_argument('--use-token-dist-loss', action='store_true', default=False,
                         help='Whether to use the final layer token distillation loss')
+    parser.add_argument('--dist-weight', help='Scale of the distillation party in the dynamic ViT loss function',
+                        default=0.5, type=float)
+    parser.add_argument('--teacher-cls-loss', action='store_true', default=False,
+                        help='Use binary cross entropy loss between averaged teacher CLS attention weights as labels'
+                             'and logits from the predictor network in loss function')
     parser.add_argument('--cls-weight', help='Scale of the classification based on the CLS token in the dynamic ViT loss'
                                         ' function', default=1.0, type=float)
     parser.add_argument('--topk-selection', action='store_true', default=False,
