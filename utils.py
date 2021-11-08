@@ -186,5 +186,9 @@ def parse_args():
                         help='Freeze the backbone of the student ViT and train only the predictor network')
     parser.add_argument('--predictor-vit', action='store_true', default=False,
                         help='Instead of an MLP use a single layer ViT as prediction network')
+    parser.add_argument('--use-kl-div-loss', action='store_true', default=False,
+                        help='Use KL divergence between logits from predictor and CLS attention from teacher as loss '
+                             'function for predicted mask')
+
 
     return parser.parse_args()

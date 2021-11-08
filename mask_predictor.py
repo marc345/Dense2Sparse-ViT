@@ -157,10 +157,24 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
             max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
             pred_keep_mask = get_mask_from_pred_logits(max_pred_cls_attn[:, 1:], args.keep_ratios[0])
 
-        hard_keep_decisions = outputs[-1][0]
-        gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
+            new_cls_attn_weights = []
+            for l in range(pred_logits.shape[1]):
+                new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
+            new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
 
-        train_loss = F.mse_loss(hard_keep_decisions, gt_patch_drop_mask, reduction='mean').float()
+            mask_loss = 100 * F.mse_loss(max_pred_cls_attn, new_cls_attn_weights, reduction='mean')
+        else:
+            pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+            if not args.use_kl_div_loss:
+                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1), patch_wise_labels.flatten())
+            else:
+                cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+                cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+                renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1, keepdim=True)
+                mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='mean')
+
+        cls_loss = F.cross_entropy(outputs[0], train_labels)
+        train_loss = mask_loss #+ cls_loss#mask_loss +
         train_loss.backward()
         optimizer.step()
         preds = torch.argmax(outputs[0].detach(), dim=1)
