@@ -512,6 +512,110 @@ class PredictorLG(nn.Module):
 
             x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
             return self.out_conv(x)
+class PredictorViT(nn.Module):
+    """ Vision Transformer
+
+    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
+        https://arxiv.org/abs/2010.11929
+    """
+    def __init__(self, num_classes=1000, embed_dim=768, depth=12,
+                 num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None, k=None,
+                 parent_embed_dim=384):
+        """
+        Args:
+            num_classes (int): number of classes for classification head
+            embed_dim (int): embedding dimension
+            depth (int): depth of transformer
+            num_heads (int): number of attention heads
+            mlp_ratio (int): ratio of mlp hidden dim to embedding dim
+            qkv_bias (bool): enable bias for qkv if True
+            qk_scale (float): override default qk scale of head_dim ** -0.5 if set
+            drop_rate (float): dropout rate
+            attn_drop_rate (float): attention dropout rate
+            drop_path_rate (float): stochastic depth rate
+            norm_layer: (nn.Module): normalization layer
+        """
+        super().__init__()
+
+        self.num_classes = num_classes
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+            for i in range(depth)])
+
+        # self.norm = norm_layer(embed_dim)
+        # self.pre_logits = nn.Identity()
+        # # Classifier head
+        # self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+
+        # Perturbed Top-K module
+        self.k = k
+        self.topk = PerturbedTopK(k)
+
+        self.transform_embed = nn.Linear(parent_embed_dim, embed_dim)
+
+        self.fwd_start = torch.cuda.Event(enable_timing=True)
+        self.fwd_end = torch.cuda.Event(enable_timing=True)
+
+        trunc_normal_(self.cls_token, std=.02)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'pos_embed', 'cls_token'}
+
+    def get_classifier(self):
+        return self.head
+
+    def reset_classifier(self, num_classes, global_pool=''):
+        self.num_classes = num_classes
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+    def forward(self, x, policy=None, current_sigma=5e-4):
+        self.fwd_start.record()
+        B = x.shape[0]
+
+        x = self.transform_embed(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x[:, 0:1] += cls_tokens
+
+        cls_attn_weights = []
+
+        for i, blk in enumerate(self.blocks):
+            x, cls_attns = blk(x, return_cls_attn=True)
+            cls_attn_weights.append(cls_attns)
+            x = blk(x)
+
+        # feature = self.norm(x)
+        # cls = feature[:, 0]
+        # tokens = feature[:, 1:]
+        # cls = self.pre_logits(cls)
+        # cls = self.head(cls)
+
+        cls_attn_weights = torch.stack(cls_attn_weights, dim=1)  # (B, L, H, N+1)
+        avg_cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+        max_cls_attn_weights, _ = torch.max(avg_cls_attn_weights, dim=1)  # (B, N+1)
+
+        self.fwd_end.record()
+        return cls_attn_weights, max_cls_attn_weights[:, 1:]
 
 
 class VisionTransformerDiffPruning(nn.Module):
@@ -525,6 +629,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
                  topk_selection=False, early_exit=False, mean_heads=False, random_drop=False):
+                 predictor_vit=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -584,10 +689,16 @@ class VisionTransformerDiffPruning(nn.Module):
         # Classifier head
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-        predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
-                                      k=int(token_ratio[i]*(img_size/patch_size)**2),
-                                      only_cls_features=early_exit)
-                          for i in range(len(pruning_loc))]
+        if not predictor_vit:
+            predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
+                                          k=int(token_ratio[i]*(img_size/patch_size)**2),
+                                          only_cls_features=early_exit, small_predictor=small_predictor)
+                              for i in range(len(pruning_loc))]
+        else:
+            predictor_list = [PredictorViT(num_classes=self.num_classes, embed_dim=self.embed_dim//4,
+                                           depth=12-pruning_loc[0], num_heads=6, mlp_ratio=1,
+                                           k=int(token_ratio[i]*(img_size/patch_size)**2), parent_embed_dim=embed_dim)
+                              for i in range(len(pruning_loc))]
 
         self.score_predictor = nn.ModuleList(predictor_list)
 

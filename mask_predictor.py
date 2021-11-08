@@ -152,10 +152,10 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
             # forward
             outputs = model(train_inputs.clone())
 
-        # zero the parameter gradients
-        optimizer.zero_grad()
-        # train_loss = loss_function(train_inputs, outputs, train_labels)
-        # train_loss.backward()
+        if args.predictor_vit:
+            avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
+            max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
+            pred_keep_mask = get_mask_from_pred_logits(max_pred_cls_attn[:, 1:], args.keep_ratios[0])
 
         hard_keep_decisions = outputs[-1][0]
         gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
@@ -218,6 +218,17 @@ def evaluate(args, model, teacher_model, val_data_loader):
             outputs = model(val_inputs.clone(), cls_attn_weights)
         else:
             outputs = model(val_inputs.clone())
+        if args.predictor_vit:
+            avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
+            max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
+            pred_keep_mask = get_mask_from_pred_logits(max_pred_cls_attn[:, 1:], args.keep_ratios[0])
+
+            new_cls_attn_weights = []
+            for l in range(pred_logits.shape[1]):
+                new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
+            new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
+
+            mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
 
         logits, _, _ = outputs
 

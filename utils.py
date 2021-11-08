@@ -180,5 +180,7 @@ def parse_args():
                         help='Use CLS attention weights from teacher, this means passing the input images through the '
                              'unpruned teacher network first to get the CLS token\'s attentions weight and using it'
                              'as patch importance metric, e.g. selecting the K patches with the highest weights')
+    parser.add_argument('--predictor-vit', action='store_true', default=False,
+                        help='Instead of an MLP use a single layer ViT as prediction network')
 
     return parser.parse_args()
