@@ -76,6 +76,24 @@ class MyDataParallel(torch.nn.DataParallel):
         except AttributeError:
             return setattr(self.module, name, value)
 
+def get_mask_from_pred_logits(logits, keep_ratio):
+    """
+        input: logits, (B, N) the predicted scores for each token in the token sequences in the current batch
+        keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
+        mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
+                    across the attention heads
+    """
+
+    sort_idxs = torch.argsort(logits, dim=-1, descending=True)
+
+    num_kept_tokens = int(logits.shape[-1]*keep_ratio)
+    kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=logits.device)
+    dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=logits.device)
+    mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
+
+    mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
+
+    return mask
 
 def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
     """
