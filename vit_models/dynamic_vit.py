@@ -534,7 +534,11 @@ class PredictorLG(nn.Module):
                 global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
 
             x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
-            return self.out_conv(x)
+
+            logits = self.out_conv(x)
+            return logits, F.log_softmax(logits, dim=-1)
+
+
 class PredictorViT(nn.Module):
     """ Vision Transformer
 
@@ -651,7 +655,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
-                 topk_selection=False, early_exit=False, mean_heads=False, random_drop=False):
+                 topk_selection=False, early_exit=False, mean_heads=False, random_drop=False, small_predictor=False,
                  predictor_vit=False):
         """
         Args:
@@ -832,13 +836,14 @@ class VisionTransformerDiffPruning(nn.Module):
                             # the 1st layer) --> only possible for random patch drop as the score is not used either way
                             pred_score = torch.zeros((B, N), device=spatial_x.device)
                         else:
-                            # take max attention weight across all heads from CLS token for each patch
-                            if self.mean_heads:
-                                current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
-                            else:
-                                current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
-                            pred_score = self.score_predictor[p_count](current_cls_attn,
-                                                                       current_sigma=self.current_sigma)  # (B, K, N)
+                            # # take max attention weight across all heads from CLS token for each patch
+                            # if self.mean_heads:
+                            #     current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
+                            # else:
+                            #     current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
+                            pred_logits, pred_score = self.score_predictor[p_count](
+                                # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1),
+                                spatial_x, current_sigma=self.current_sigma)  # (B, K, N)
                 ########################################################################################################
                 ############################### DYNAMIC VIT SCORE GENERATION ###########################################
                 ########################################################################################################
@@ -858,7 +863,10 @@ class VisionTransformerDiffPruning(nn.Module):
                     else:
                         # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
                         #                                            policy=prev_decision).reshape(B, -1, 2)
-                        pred_score = self.score_predictor[p_count](spatial_x, policy=prev_decision).reshape(B, -1, 2)
+                        pred_logits, pred_score = self.score_predictor[p_count](
+                            # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1), policy=prev_decision)
+                            spatial_x, policy=prev_decision)
+                        pred_score = pred_score.reshape(B, -1, 2)
                     self.current_score = pred_score.detach().clone()
                 ########################################################################################################
                 ################################### PRUNING DURING TRAINING ############################################
@@ -869,13 +877,16 @@ class VisionTransformerDiffPruning(nn.Module):
                         cls_x = x[:, 0:1]
                         # multiply transposed indicators with tokens to obtain differentiable topK selection
                         #pred_score = pred_score[:, :, torch.randperm(pred_score.shape[-1])]
-                        spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
+                        # spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
+                        cls_policy = torch.zeros(B, 1, dtype=pred_score.dtype, device=pred_score.device)
+                        naive_topk_idx = torch.cat([cls_policy, pred_score + 1], dim=1)
+                        x = torch.gather(input=x, dim=1, index=naive_topk_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
                         # always keep cls token
-                        x = torch.cat((cls_x, spatial_x), dim=1)
+                        # x = torch.cat((cls_x, spatial_x), dim=1)
                         x, current_cls_attn = blk(x, return_cls_attn=True)
                     ############# PATCH DROP VIA MASKED SELF ATTENTION WITH POLICY (SEE DYNAMIC VIT PAPER) #############
                     else:
-                        hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
+                        hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 1:] * prev_decision
                         self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision.detach(), dim=1)/
                                                                hard_keep_decision.shape[1]))
                         out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
@@ -904,7 +915,7 @@ class VisionTransformerDiffPruning(nn.Module):
                         # sort score in descending order and take top most according to keep ratio
                         keep_policy = torch.argsort(score, dim=1, descending=True)
                     else:
-                        score = pred_score[:, :, 0]
+                        score = pred_score[:, :, 1]
                         # sort score in descending order and take top most according to keep ratio
                         keep_policy = torch.argsort(score, dim=1, descending=True)
 
@@ -948,13 +959,14 @@ class VisionTransformerDiffPruning(nn.Module):
         x = self.head(x)
         if self.training:
             if self.topk_selection:
-                return x, features
+                return x, pred_logits, features
             if self.distill:
-                return x, features, prev_decision.detach(), out_pred_prob
+                # return the final logits, final spatial tokens,
+                return x, features, prev_decision.detach(), pred_logits, out_pred_prob
             else:
                 return x, out_pred_prob
         else:
-            return x, self.cls_attns, now_policy
+            return x, self.cls_attns, pred_logits, now_policy
 
 
     def forward_cls_attn(self, x):
@@ -1082,8 +1094,7 @@ class VisionTransformerTeacher(nn.Module):
 
         return torch.stack(cls_attn_weights, dim=1)
 
-
-    def forward(self, x, return_final_cls_attn=False):
+    def forward(self, x, return_final_cls_attn=False, return_cls_attns=False):
         B = x.shape[0]
         x = self.patch_embed(x)
 
@@ -1092,19 +1103,27 @@ class VisionTransformerTeacher(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
+        cls_attn_weights = []
+
         for i, blk in enumerate(self.blocks):
+            x, cls_attns = blk(x, return_cls_attn=True)
+            cls_attn_weights.append(cls_attns.detach())
             x = blk(x)
-            # return only the CLS token attention weights from the last encoder layer
-            if return_final_cls_attn and i == len(self.blocks)-1:
-                _, final_cls_attn = blk(x, return_cls_attn=return_final_cls_attn)
-                return final_cls_attn
+
+        # return only the CLS token attention weights from the last encoder layer
+        if return_final_cls_attn:
+            return cls_attn_weights[-1]
 
         feature = self.norm(x)
         cls = feature[:, 0]
         tokens = feature[:, 1:]
         cls = self.pre_logits(cls)
         cls = self.head(cls)
-        return cls, tokens
+
+        if return_cls_attns:
+            return cls, tokens, cls_attn_weights
+        else:
+            return cls, tokens
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from

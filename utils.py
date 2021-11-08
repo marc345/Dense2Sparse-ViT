@@ -189,6 +189,8 @@ def parse_args():
                         help='Freeze the backbone of the student ViT and train only the predictor network')
     parser.add_argument('--visualize-cls-attn-evo', action='store_true', default=False,
                         help='Freeze the backbone of the student ViT and train only the predictor network')
+    parser.add_argument('--small-predictor', action='store_true', default=False,
+                        help='Use the default predictor network architecture as in dynamic vit')
     parser.add_argument('--predictor-vit', action='store_true', default=False,
                         help='Instead of an MLP use a single layer ViT as prediction network')
     parser.add_argument('--use-kl-div-loss', action='store_true', default=False,

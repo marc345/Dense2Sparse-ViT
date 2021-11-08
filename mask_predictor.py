@@ -31,7 +31,6 @@ import attention_segmentation
 from ddp_training import train_model_ddp
 from vit_models import dynamic_vit_small_patch16_224_student
 
-
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
@@ -95,6 +94,7 @@ def get_mask_from_pred_logits(logits, keep_ratio):
 
     return mask
 
+
 def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
     """
         input: cls_attns, (B, L, H, N+1) the CLS attention weights from the unpruned teacher network from all the
@@ -103,26 +103,32 @@ def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
         mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
                     across the attention heads
     """
+    # mean across all encoder layers
     cls_attns = torch.mean(cls_attns, dim=1)
     if mean_heads:
+        # aggregate across heads via mean
         cls_attns = torch.mean(cls_attns, dim=1)
     else:
+        # aggregate across heads via max
         cls_attns, _ = torch.max(cls_attns, dim=1)
+    # exclude CLS weight
     cls_attns = cls_attns[:, 1:]
 
+    # sort in order to take K highest according to keeping ratio
     sort_idxs = torch.argsort(cls_attns, dim=-1, descending=True)
 
+    # compute nubmer of kept tokens
     num_kept_tokens = int(cls_attns.shape[-1]*keep_ratio)
+    # 1s in mask --> kept tokens
     kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=cls_attns.device)
+    # 0s in mask --> dropped tokens
     dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=cls_attns.device)
     mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
 
+    # bring back tokens in original order (currently still sorted descending)
     mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
 
     return mask
-
-
-
 
 
 #######################################################################################################################
@@ -130,27 +136,59 @@ def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
 # main training function
 
 
-def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function, optimizer):
+def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterion, loss_function, optimizer):
 
-    running_loss = 0.0
-    running_acc = 0.0
-    running_keeping_ratio = 0.0
+    running_loss, running_acc, running_keeping_ratio, running_mask_loss, running_mask_acc, running_cls_loss = \
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    running_fwd_time, running_bwd_time, running_teacher_fwd_time, running_pred_fwd_time = 0.0, 0.0, 0.0, 0.0
+    TP, FP, TN, FN = 0, 0, 0, 0
 
     metrics = {}
 
     model.train()
 
+    # right way to record execution time of cuda operations:
+    # https://discuss.pytorch.org/t/how-to-measure-time-in-pytorch/26964/11
+    fwd_start = torch.cuda.Event(enable_timing=True)
+    fwd_end = torch.cuda.Event(enable_timing=True)
+    bwd_start = torch.cuda.Event(enable_timing=True)
+    bwd_end = torch.cuda.Event(enable_timing=True)
+
+    # for i in tqdm(range(1)):
     for i, train_data in enumerate(tqdm(train_data_loader)):
         train_inputs = train_data[0].to(args.device)
         train_labels = train_data[1].to(args.device)
+        # train_inputs = mask_test_imgs
+        # train_labels = mask_test_labels
 
+        fwd_start.record()
+        cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
+        fwd_end.record()
+        torch.cuda.synchronize()
+        running_teacher_fwd_time += fwd_start.elapsed_time(fwd_end)
+
+        fwd_start.record()
         if args.cls_from_teacher:
-            cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
             # forward with CLS attention weights from unpruned teacher network
             outputs = model(train_inputs.clone(), cls_attn_weights)
         else:
             # forward
             outputs = model(train_inputs.clone())
+        fwd_end.record()
+        # Waits for everything to finish running
+        torch.cuda.synchronize()
+        running_fwd_time += fwd_start.elapsed_time(fwd_end)
+        running_pred_fwd_time += list(model.children())[-1][0].fwd_start.elapsed_time(list(model.children())[-1][0].fwd_end)
+
+        pred_logits = outputs[-2]
+
+        # O in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
+        # O in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
+        # 0 in patch wise labels --> negative class/dropped patches, 1 in patch wise labels --> positive class/kept patches
+        # gt_patch_drop_mask: 0 --> dropped token, 1 --> kept token
+        # labels: 0 --> class 0 or dropped token, 1 --> class 1 or kept token
+        gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
+        patch_wise_labels = gt_patch_drop_mask.long().to(args.device)
 
         if args.predictor_vit:
             avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
@@ -175,16 +213,39 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
 
         cls_loss = F.cross_entropy(outputs[0], train_labels)
         train_loss = mask_loss #+ cls_loss#mask_loss +
+
+        # zero the parameter gradients
+        optimizer.zero_grad()
+        bwd_start.record()
         train_loss.backward()
+        bwd_end.record()
+        # Waits for everything to finish running
+        torch.cuda.synchronize()
+        running_bwd_time += bwd_start.elapsed_time(bwd_end)
         optimizer.step()
         preds = torch.argmax(outputs[0].detach(), dim=1)
 
-        if i % 200 == 0:
-            print(f'training step_{i} loss (MSE): {train_loss.detach().item():.4f}')
+        if i % (200 if args.is_sbatch else 10) == 0:
+            print(f'training step_{i} '#patch bce loss: {mask_ce_loss.detach().item():.4f}, '
+                  f'mask loss: {mask_loss.detach().item():.4f}, '
+                  f'train loss: {train_loss:.4f}, '
+                  f'pred mask acc: {torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel():.4f}, '
+                  f'cls loss: {cls_loss.detach().item():.4f}, '
+                  f'acc: {(torch.sum(preds == train_labels.data) / train_labels.shape[0]).item():.4f}')
+            if not args.topk_selection:
+                print(f'Kept token ratio: {getattr(model, "num_kept_tokens")[-1]:.4f}')
 
         # statistics
         running_loss += train_loss.detach().item()
         running_acc += torch.sum(preds == train_labels.data) / train_labels.shape[0]
+        running_mask_loss += mask_loss.detach().item()
+        running_mask_acc += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
+        running_cls_loss += cls_loss.detach().item()
+
+        TP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 1).item()  # keep patch predicted for keep patch class
+        TN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 0).item()  # drop patch predicted for drop patch class
+        FP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 0).item()  # keep patch predicted for drop patch class
+        FN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 1).item()  # drop patch predicted for keep patch class
 
         # for i, decision in enumerate(getattr(model, "decisions")):
         # mean token keeping ratio across batch
@@ -195,18 +256,37 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
 
     metrics["train_loss"] = running_loss / len(train_data_loader)  # batch_repeat_factor
     metrics["train_acc"] = float(running_acc) / (len(train_data_loader))  # batch_repeat_factor
+    metrics["train_mask_loss"] = running_mask_loss / len(train_data_loader)
+    metrics["train_mask_acc"] = running_mask_acc / len(train_data_loader)
+    metrics["train_cls_loss"] = running_cls_loss / len(train_data_loader)
 
-    # metrics['cls_loss'] = loss_function.cls_loss / loss_function.count
-    # metrics['cls_dist_loss'] = loss_function.cls_distill_loss / loss_function.count
-    # if not args.topk_selection and args.use_ratio_loss:
-    #     metrics['ratio_loss'] = loss_function.ratio_loss / loss_function.count
-    # if not args.topk_selection and args.use_token_dist_loss:
-    #     metrics['token_distill_loss'] = loss_function.token_distill_loss / loss_function.count
+    # metrics["train TP"] = TP
+    # metrics["train TN"] = TN
+    # metrics["train FP"] = FP
+    # metrics["train FN"] = FN
+    # metrics["train FPR"] = FP / (FP + TN)  # False Positive Rate
+    # metrics["train Recall"] = TP / (TP + FN)  # True Positive Rate
+    # metrics["train Precision"] = TP / (TP + FP)  # Positive Predictive Value
+
     # if not args.topk_selection:
-    #     metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
-    #     print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
+    #     train_loss += loss_function(train_inputs, outputs, train_labels)
+    #     if args.use_ratio_loss:
+    #         metrics['kept_token_ratio_loss'] = loss_function.ratio_loss / loss_function.count
+    #     if args.use_token_dist_loss:
+    #         metrics['kept_token_dist_loss'] = loss_function.token_distill_loss / loss_function.count
+    #
+    #     metrics['cls_loss'] = loss_function.cls_loss / loss_function.count
+    #     metrics['cls_dist_loss'] = loss_function.cls_distill_loss / loss_function.count
 
-    print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}')
+    if not args.topk_selection:
+        metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
+        print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
+
+    print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}, '
+          f'avg unpruned fwd pass took: {(running_teacher_fwd_time / len(train_data_loader)):.2f} ms, '
+          f'avg forward pass took {(running_fwd_time / len(train_data_loader)):.2f} ms, '
+          f'avg backward pass took {(running_bwd_time / len(train_data_loader)):.2f} ms, '
+          f'avg predictor forward pass took {(running_pred_fwd_time / len(train_data_loader)):.2f} ms')
 
     return metrics
 
@@ -214,24 +294,57 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, loss_function
 #######################################################################################################################
 
 
-def evaluate(args, model, teacher_model, val_data_loader):
+def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
-    running_loss = 0.0
-    running_acc = 0.0
+    running_loss, running_acc, running_mask_acc, running_mask_loss = 0.0, 0.0, 0.0, 0.0
+    running_fwd_time, running_teacher_fwd_time, running_pred_fwd_time = 0.0, 0.0, 0.0
+
+    TP, FP, TN, FN, = 0, 0, 0, 0
 
     model.eval()
 
     metrics = {}
+    accumulated_cls_attns = None
+
+    fwd_start = torch.cuda.Event(enable_timing=True)
+    fwd_end = torch.cuda.Event(enable_timing=True)
 
     for val_inputs, val_labels in tqdm(val_data_loader):
+    # for i in tqdm(range(1)):
+        # val_inputs = mask_test_imgs
+        # val_labels = mask_test_labels
         val_inputs = val_inputs.to(args.device)
         val_labels = val_labels.to(args.device)
 
+        fwd_start.record()
+        cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
+        fwd_end.record()
+        torch.cuda.synchronize()
+        running_teacher_fwd_time += fwd_start.elapsed_time(fwd_end)
+
+        gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
+
+        fwd_start.record()
         if not args.random_drop and args.cls_from_teacher:
-            cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
             outputs = model(val_inputs.clone(), cls_attn_weights)
         else:
             outputs = model(val_inputs.clone())
+        fwd_end.record()
+        # Waits for everything to finish running
+        torch.cuda.synchronize()
+        running_fwd_time += fwd_start.elapsed_time(fwd_end)
+        # get saved forward time from model's predictor submodule fwd_time attribute
+        running_pred_fwd_time += list(model.children())[-1][0].fwd_start.elapsed_time(list(model.children())[-1][0].fwd_end)
+
+        logits, cls_attns, pred_logits, _ = outputs
+
+        # O in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
+        # O in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
+        # 0 in patch wise labels --> negative class/dropped patches, 1 in patch wise labels --> positive class/kept patches
+        # gt_patch_drop_mask:  0 --> dropped token, 1 --> kept token
+        # labels: 0 --> class 0 or dropped token, 1 --> class 1 or kept token
+        patch_wise_labels = (gt_patch_drop_mask).long().to(args.device)
+
         if args.predictor_vit:
             avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
             max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
@@ -243,8 +356,21 @@ def evaluate(args, model, teacher_model, val_data_loader):
             new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
 
             mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
+        else:
+            pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+            if not args.use_kl_div_loss:
+                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1), patch_wise_labels.flatten())
+            else:
+                cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+                cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+                renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=1, keepdim=True)
 
-        logits, _, _ = outputs
+                mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
+
+        if accumulated_cls_attns is None:
+            accumulated_cls_attns = cls_attns.copy()
+        else:
+            accumulated_cls_attns = [acc_cls + curr_cls for acc_cls, curr_cls in zip(accumulated_cls_attns, cls_attns)]
 
         loss = F.cross_entropy(logits, val_labels)
         preds = torch.argmax(logits.detach(), dim=1)
@@ -252,19 +378,52 @@ def evaluate(args, model, teacher_model, val_data_loader):
         # statistics
         running_loss += loss.detach().item()
         running_acc += torch.sum(preds == val_labels.data) / val_labels.shape[0]
+        running_mask_loss += mask_loss.detach().item()
+        running_mask_acc += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
+
+        TP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 1).item()  # keep patch predicted for keep patch class
+        TN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 0).item()  # drop patch predicted for drop patch class
+        FP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 0).item()  # keep patch predicted for drop patch class
+        FN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 1).item()  # drop patch predicted for keep patch class
 
     metrics['val_loss'] = running_loss / len(val_data_loader)  # batch_repeat_factor
     metrics['val_acc'] = float(running_acc) / (len(val_data_loader))  # batch_repeat_factor
+    metrics["val_mask_loss"] = running_mask_loss / len(val_data_loader)
+    metrics["val_mask_acc"] = running_mask_acc / len(val_data_loader)
+
+    # metrics["val TP"] = TP
+    # metrics["val TN"] = TN
+    # metrics["val FP"] = FP
+    # metrics["val FN"] = FN
+    # metrics["val FPR"] = FP / (FP + TN)  # False Positive Rate
+    # metrics["val Recall"] = TP / (TP + FN)  # True Positive Rate
+    # metrics["val Precision"] = TP / (TP + FP)  # Positive Predictive Value
+
     args.epoch_acc = metrics['val_acc']  # for title of visualization plot
-    print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}')
+    print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}, '
+          f'avg unpruned forward pass took {(running_teacher_fwd_time / len(val_data_loader)):.2f} ms, '
+          f'avg forward pass took {(running_fwd_time / len(val_data_loader)):.2f} ms, '
+          f'avg predictor forward pass took {(running_pred_fwd_time / len(val_data_loader)):.2f} ms')
 
-    return metrics
+    for i, cls_attns in enumerate(accumulated_cls_attns):
+        # mean accross batch
+        cls_attns = torch.mean(cls_attns, dim=0)
+        # average accumulated values over whole epoch
+        cls_attns = cls_attns / len(val_data_loader)
+        # round to 2 decimal places
+        #cls_attns = torch.round(cls_attns * 10 ** 1) / (10 ** 1)
+        accumulated_cls_attns[i] = cls_attns
+
+    # len(accumulated_cls_attns) = L
+    # accumulated_cls_attns[0].shape = (H, N+1)
+
+    return metrics, accumulated_cls_attns
 
 #######################################################################################################################
 #######################################################################################################################
 
 
-def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
+def visualize(model, teacher_model, current_epoch, test_imgs, test_labels, avg_cls_attn_list):
     model.eval()
     with torch.no_grad():
 
@@ -275,9 +434,9 @@ def visualize(model, teacher_model, current_epoch, test_imgs, test_labels):
 
         if not args.random_drop and args.cls_from_teacher:
             cls_attn_weights = teacher_model.forward_cls_attention(test_imgs.clone())  # (B, L, H, N+1)
-            test_logits, cls_attns, final_policy = model(test_imgs.clone(), cls_attn_weights)
+            test_logits, cls_attns, pred_logits, final_policy = model(test_imgs.clone(), cls_attn_weights)
         else:
-            test_logits, cls_attns, final_policy = model(test_imgs.clone())
+            test_logits, cls_attns, pred_logits, final_policy = model(test_imgs.clone())
 
         test_preds = torch.argmax(test_logits, dim=1)
 
@@ -347,24 +506,48 @@ if __name__ == '__main__':
     if args.is_sbatch:
         args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
-        args.patch_selection_method = f'{"differentiable_topk" if args.topk_selection else "gumbel_softmax"}_predictor'
+        args.patch_selection_method = f'{"topk" if args.topk_selection else "gumbel"}_predictor'
         if args.topk_selection:
             if args.random_drop:
                 args.patch_selection_method += '_random_drop/'
-            else:
-                args.patch_selection_method += f"{'_mean_heads' if args.mean_heads else '_max_heads'}/"
+            # else:
+            #     args.patch_selection_method += f"{'_mean_heads' if args.mean_heads else '_max_heads'}"
+            args.patch_selection_method += f'_teacher_cls_loss'
         else:
-            args.patch_selection_method = '/'
+            args.patch_selection_method += f'_teacher_cls_loss'
 
-        args.job_name = 'GT_' + args.patch_selection_method + \
+        # loss function used for predicted mask vs. ground truth mask from averaged teacher CLS attention
+        if args.use_kl_div_loss:
+            args.patch_selection_method += f'_mse'
+        else:
+            args.patch_selection_method += f'_bce_ce'
+
+        # frozen backbone, only train predictor
+        if args.freeze_backbone:
+            args.patch_selection_method += '_frozen_backbone/'
+        else:
+            args.patch_selection_method += '/'
+
+        # pruning and keep ratio parameters
+        args.job_name = args.patch_selection_method + \
                         f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
                         f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}' \
                         # f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
                         # f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
                         # f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
+
+        # inital sigma if top-k selection is used, sigma is decayed linearly over training
         if args.topk_selection:
             args.job_name += f'_S{args.initial_sigma}'
-        
+
+        # either small MLP, large MLP or 1-layer ViT are used as predictor networks
+        if not args.predictor_vit and args.small_predictor:
+            args.job_name += '_sMP'
+        elif not args.predictor_vit:
+            args.job_name += '_lMP'
+        else:
+            args.job_name += '_VP'
+
         args.job_name += f'_{str(args.job_id)}'
 
             # for top-k the batch size is adapted based on the prunin location
@@ -392,16 +575,24 @@ if __name__ == '__main__':
             data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
             # args.is_sbatch = True
         args.job_name = 'debug_job'
-        args.batch_size = 64
+        args.batch_size = 32
+        args.lr = 0.0005
         args.epochs = 10
 
-        args.topk_selection = False
-        args.attn_selection = False
-        args.initial_sigma = 0.0005
+        args.pruning_locs = [2]
+        args.keep_ratios = [0.5]
+        args.topk_selection = True
+        args.attn_selection = True
+        args.initial_sigma = 1e-8
         args.use_ratio_loss = True
         args.use_token_dist_loss = True
-
-        # args.early_exit = True
+        args.freeze_backbone = True
+        args.visualize_patch_drop = False
+        args.visualize_cls_attn_evo = False
+        args.small_predictor = False
+        args.use_kl_div_loss = True
+        args.softmax_temp = 0.05
+        args.predictor_vit = False
 
     if args.use_ddp:
         print(f'Using distributed data parallel training on {args.world_size} GPUs')
@@ -419,7 +610,9 @@ if __name__ == '__main__':
         # get the model specified as argument
         student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
                                                         topk_selection=args.topk_selection, early_exit=args.early_exit,
-                                                        mean_heads=args.mean_heads, random_drop=args.random_drop)
+                                                        mean_heads=args.mean_heads, random_drop=args.random_drop,
+                                                        small_predictor=args.small_predictor,
+                                                        predictor_vit=args.predictor_vit)
         parameter_group = utils.get_param_groups(student, args)
 
         # freeze whole model except predictor network
@@ -444,11 +637,20 @@ if __name__ == '__main__':
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
         optim = torch.optim.AdamW(parameter_group, **opt_args)
 
-        criterion = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
+        dynamic_vit_loss = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
                                                   ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
                                                   pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
                                                   base_criterion=torch.nn.CrossEntropyLoss(),
                                                   softmax_temp=args.softmax_temp, early_exit=args.early_exit)
+
+        # for pixel-wise crossentropy loss
+        # as the classes (1: kept token, 0: dropped token) we use a weight for the positive class to counteract
+        # this class imbalance
+        dropped_token_weights = torch.ones(size=(1,)) * args.keep_ratios[0]
+        kept_token_weights = torch.ones(size=(1,)) * (1-args.keep_ratios[0])
+        weights = torch.cat((dropped_token_weights, kept_token_weights)).to(args.device)
+        # mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[0])
+        mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
 
         data = {x: datasets.ImageFolder(data_dir, transform=data_transforms[x])
                 for x in ['train', 'val']}
@@ -473,7 +675,8 @@ if __name__ == '__main__':
 
         # prepare data loaders
         data_loaders = {x: DataLoader(data[x], batch_size=args.batch_size, sampler=samplers[x],
-                                      pin_memory=True, num_workers=2 if args.is_sbatch else 0)
+                                      pin_memory=True, num_workers=2 if args.is_sbatch else 0,
+                                      drop_last=(x == 'val'))
                         for x in ['train', 'val']}
 
         #print(indices[split - 64:split])
@@ -500,6 +703,12 @@ if __name__ == '__main__':
         student = student.to(args.device)
         teacher = teacher.to(args.device)
 
+        predictor_network_params = 0
+        for n, p in student.named_parameters():
+            if 'predictor' in n and p.requires_grad:
+                predictor_network_params += p.numel()
+        print(f'Total number of trainable parameters in predictor network in millions: {predictor_network_params/1e6}')
+
         print(f"Start training for {args.epochs} epochs, with batch size of {args.batch_size}")
 
         since = time.time()
@@ -511,16 +720,17 @@ if __name__ == '__main__':
 
             epoch_metrics = {}
 
-            warmup_step = 5 if not args.attn_selection else 0  # warmup step for predictor modules
+            warmup_step = args.warmup_steps #if not args.attn_selection else 0  # warmup step for predictor modules
             utils.adjust_learning_rate(optim.param_groups, args, epoch,
                                        warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
             if args.topk_selection:
                 # linearly decay sigma of top-k module during training
                 student.current_sigma = args.current_sigma
 
-            train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'], criterion, optim)
-            val_metrics = evaluate(args, student, teacher, data_loaders['val'])
-            visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels)
+            train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'],
+                                            mask_loss_fn, dynamic_vit_loss, optim)
+            val_metrics, avg_cls_attns = evaluate(args, student, teacher, data_loaders['val'], mask_loss_fn)
+            visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels, avg_cls_attns)
 
             epoch_metrics = dict(train_metrics, **val_metrics)
             if epoch_metrics['val_acc'] > best_acc:
@@ -536,7 +746,4 @@ if __name__ == '__main__':
             wandb.run.summary["best_accuracy"] = best_acc
         print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
         print(f'Best val acc: {best_acc:4f}')
-
-    # print(f'Finished {"distributed data parallel" if args.use_ddp else "single GPU"} training of {args.epochs} epochs '
-    #       f'with batch size {args.batch_size} after {(time.time()-training_start)/60:3.2f} minutes')
 
