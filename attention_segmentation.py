@@ -335,3 +335,69 @@ def visualize_heads(image, args, epoch_num, patch_indices, cls_attns, b_idx):
     pathlib.Path(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"{save_path}/cls_attn_evolution_epoch_{epoch_num}/image_{b_idx+1}.jpg")
     plt.close()
+
+
+def cls_attention_histogram(args, epoch_num, cls_attn_list):
+    save_path = args.save_path + args.job_name + '/'
+    # if running on cluster save the outputted images to net_scratch folder synced with polybox
+    # outputted images otherwise fill up 5GB limit of local storage
+    if args.is_sbatch:
+        save_path = args.img_save_path + save_path
+    pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
+
+    L = len(cls_attn_list)
+    H, N_total = cls_attn_list[0].shape
+    N = N_total - 1  # number of spatial tokens
+
+    num_rows = H  # head count
+    num_cols = L  # layer count
+    fig, axs = plt.subplots(num_rows, num_cols, figsize=(22, 10), gridspec_kw={'wspace': 0.25, 'hspace': 0.35})
+    # for ax in axs.flatten():
+    #     ax.set_aspect('equal')
+
+    for layer in range(num_cols):
+        if layer >= args.pruning_locs[0]:
+            plot_color = 'red'
+        else:
+            plot_color = 'blue'
+        curr_cls_attns = cls_attn_list[layer].cpu().numpy()  # (H, N+1)
+        for head in range(num_rows):
+            spatial_weights = curr_cls_attns[head, 1:]
+            min_spatial = np.min(spatial_weights)
+            max_spatial = np.max(spatial_weights)
+            nonzero_spatial = np.sum(spatial_weights != 0.0)
+            # q25, q75 = np.percentile(spatial_weights, [0.25, 0.75])
+            # bin_width = 2 * (q75 - q25) * len(spatial_weights) ** (-1 / 3)
+            # bins = round((spatial_weights.max() - spatial_weights.min()) / bin_width)
+            bins = [i/10000 for i in range(0, 501, 25)]
+            axs[head, layer].set_title(f'{curr_cls_attns[head, 0]:.2f} | '
+                                       f'{min_spatial:.3f} | '
+                                       f'{max_spatial:.3f}', fontsize=10, y=0.94)
+            axs[head, layer].hist(spatial_weights, bins=bins, color=plot_color)
+
+    # cbar_ax = fig.add_axes([0.15, 0.08, 0.7, 0.015])
+    # cbar = fig.colorbar(heatmap, cax=cbar_ax, orientation='horizontal')
+    # cbar.set_ticks([cbar.vmin, cbar.vmax])
+    # cbar.set_ticklabels(['min', 'max'])
+    # cbar.ax.set_xlabel('Attention weight magnitude for different attention heads (top to bottom) of an encoder layer, '
+    #                    'starting with the input layer on the left and the final layer before the '
+    #                    'output on the right.\nThe numbers above each image are the weight of the CLS '
+    #                    'token on the left, the sum of all spatial tokens in the middle, and the maximum weight among '
+    #                    'all spatial tokens on the right.',
+    #                    fontdict={'size': 16}, y=0.06)
+    # cbar.ax.tick_params(labelsize=14)
+
+    suptitle_str = f'CLS token attention weights evolution through ViT layers\n' #\
+                   # f'Epoch: {epoch_num}, validation accuracy: {args.epoch_acc:.4f} | ' \
+                   # f'using {"perturbed Top-K" if args.topk_selection else "Gumbel softmax"} predictor | ' \
+                   # f'pruning patches before layers [{",".join(str(loc) for loc in args.pruning_locs)}] | ' \
+                   # f'keeping ratios of [{",".join(str(round(ratio, 2)) for ratio in args.keep_ratios)}]'
+    # if args.topk_selection and hasattr(args, 'current_sigma'):
+    #     suptitle_str += f' | current sigma of {args.current_sigma:.7f}'
+    fig.suptitle(suptitle_str, fontsize=18, y=0.99)
+
+    fig.subplots_adjust(left=0.02, bottom=0.11, right=0.99, top=0.90)
+
+    pathlib.Path(f"{save_path}/cls_attn_weights_histograms").mkdir(parents=True, exist_ok=True)
+    plt.savefig(f"{save_path}/cls_attn_weights_histograms/epoch_{epoch_num}.jpg")
+    plt.close()
