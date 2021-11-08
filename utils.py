@@ -74,7 +74,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     if args.topk_selection:
         args.current_sigma = max(0, (1-step/args.epochs)*args.initial_sigma)
     cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
-    cos_lr = args.min_lr + cos_lr * (args.lr - args.min_lr)
+    cos_lr = args.lr #(args.min_lr + cos_lr * (args.lr - args.min_lr))
     if args.early_exit:
         early_exit_head_lr = 0 #cos_lr * 10
     if warmup_predictor and step < 1:
@@ -84,7 +84,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     else:
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
-    lr_info = f'### Using lr  {backbone_lr:.7f} for BACKBONE, cosine lr = {cos_lr:.7f} for PREDICTOR'
+    lr_info = f'### Using lr  {backbone_lr:.7f} for BACKBONE, constant lr = {cos_lr:.7f} for PREDICTOR'
     if args.topk_selection:
         lr_info += f', current sigma = {args.current_sigma:.7f} for TOP-K'
     if args.early_exit:
@@ -135,6 +135,9 @@ def parse_args():
                         help='warmup learning rate (default: 1e-6)')
     parser.add_argument('--min-lr', type=float, default=1e-5, metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+    parser.add_argument('--warmup-steps',
+                        help='Number of epochs which backbone stays frozen and only predictor is trained',
+                        default=5, type=int)
 
     # Dynamic ViT configuration arguments
     parser.add_argument('--early-exit', action='store_true', default=False,
@@ -180,6 +183,8 @@ def parse_args():
                         help='Use CLS attention weights from teacher, this means passing the input images through the '
                              'unpruned teacher network first to get the CLS token\'s attentions weight and using it'
                              'as patch importance metric, e.g. selecting the K patches with the highest weights')
+    parser.add_argument('--freeze-backbone', action='store_true', default=False,
+                        help='Freeze the backbone of the student ViT and train only the predictor network')
     parser.add_argument('--visualize-patch-drop', action='store_true', default=False,
                         help='Freeze the backbone of the student ViT and train only the predictor network')
     parser.add_argument('--visualize-cls-attn-evo', action='store_true', default=False,
