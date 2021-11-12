@@ -364,12 +364,14 @@ class BatchNormLayer(nn.Module):
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False, small_predictor=False):
+    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False, small_predictor=False,
+                 kl_div_loss=False):
         super().__init__()
 
         self.small_predictor = small_predictor
         self.k = k
         self.topk_selection = topk_selection
+        self.kl_div_loss = kl_div_loss
 
         if topk_selection and k is not None:
             self.act = nn.GELU()
@@ -534,12 +536,17 @@ class PredictorLG(nn.Module):
             # logits = self.out_conv_bn(x)
             # probs = F.softmax(logits, dim=-1)
             # scores = F.softmax(probs[:, :, 1], dim=-1)
-
+            if self.kl_div_loss:
+                # use mse loss/make scores resemble teacher CLS attn weights
+                keep_probs = F.softmax(scores, dim=-1)
+            else:
+                # use bce loss
+                keep_probs = torch.sigmoid(scores)
             if self.training:
-                topk_scores = torch.topk(scores, self.k, dim=-1)[1]#self.topk(scores, current_sigma=current_sigma)self.topk(scores, current_sigma=current_sigma)#
+                topk_scores = torch.topk(keep_probs, self.k, dim=-1)[1]#self.topk(scores, current_sigma=current_sigma)self.topk(scores, current_sigma=current_sigma)#
                 return scores, topk_scores
             else:
-                return scores, scores
+                return scores, keep_probs
         else:
             x = self.in_conv(x)
             B, N, C = x.size()  # C
@@ -670,7 +677,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
                  topk_selection=False, early_exit=False, mean_heads=False, random_drop=False, small_predictor=False,
-                 predictor_vit=False):
+                 predictor_vit=False, predictor_kl_div_loss=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -733,7 +740,8 @@ class VisionTransformerDiffPruning(nn.Module):
         if not predictor_vit:
             predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
                                           k=int(token_ratio[i]*(img_size/patch_size)**2),
-                                          only_cls_features=early_exit, small_predictor=small_predictor)
+                                          only_cls_features=early_exit, small_predictor=small_predictor,
+                                          kl_div_loss=predictor_kl_div_loss)
                               for i in range(len(pruning_loc))]
         else:
             predictor_list = [PredictorViT(num_classes=self.num_classes, embed_dim=self.embed_dim//4,

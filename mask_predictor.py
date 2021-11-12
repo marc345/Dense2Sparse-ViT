@@ -200,15 +200,21 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
                 new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
             new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
             mask_loss = 100 * F.mse_loss(max_pred_cls_attn, new_cls_attn_weights, reduction='mean')
+
         else:
-            pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+
             if not args.use_kl_div_loss:
-                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1), patch_wise_labels.flatten())
+                pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+                # pred_logits = torch.stack((1-pred_logits, pred_logits), dim=-1)
+                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
+                                           patch_wise_labels.float().flatten())
             else:
+                pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
                 cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
                 cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
                 renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1, keepdim=True)
-                mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='mean')
+                # mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
+                mask_loss = 1000 * F.kl_div(F.log_softmax(pred_logits, dim=-1), torch.log(renormalized_cls), log_target=True)
 
         cls_loss = F.cross_entropy(outputs[0], train_labels)
         train_loss = mask_loss #+ cls_loss#mask_loss +
@@ -295,12 +301,16 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     metrics = {}
     accumulated_cls_attns = None
 
+    for val_idxs, val_attn_weights, val_inputs, val_labels in tqdm(val_data_loader):
     # for i in tqdm(range(1)):
-        # val_inputs = mask_test_imgs
-        # val_labels = mask_test_labels
+    #     val_attn_weights = mask_test_attn_weights
+    #     val_inputs = mask_test_imgs
+    #     val_labels = mask_test_labels
+        val_attn_weights = val_attn_weights.to(args.device)
         val_inputs = val_inputs.to(args.device)
         val_labels = val_labels.to(args.device)
 
+        cls_attn_weights = val_attn_weights  # (B, L, H, N+1)
 
         gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
 
@@ -311,8 +321,8 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
         logits, cls_attns, pred_logits, _ = outputs
 
-        # O in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
-        # O in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
+        # 0 in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
+        # 0 in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
         # 0 in patch wise labels --> negative class/dropped patches, 1 in patch wise labels --> positive class/kept patches
         # gt_patch_drop_mask:  0 --> dropped token, 1 --> kept token
         # labels: 0 --> class 0 or dropped token, 1 --> class 1 or kept token
@@ -330,15 +340,17 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
             mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
         else:
-            pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
             if not args.use_kl_div_loss:
-                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1), patch_wise_labels.flatten())
+                pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
+                                           patch_wise_labels.float().flatten())
             else:
+                pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
                 cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
                 cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
                 renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=1, keepdim=True)
-
-                mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
+                # mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
+                mask_loss = 1000 * F.kl_div(F.log_softmax(pred_logits, dim=-1), torch.log(renormalized_cls), log_target=True)
 
         if accumulated_cls_attns is None:
             accumulated_cls_attns = cls_attns.copy()
@@ -373,7 +385,7 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     # metrics["val Precision"] = TP / (TP + FP)  # Positive Predictive Value
 
     args.epoch_acc = metrics['val_acc']  # for title of visualization plot
-    print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}, '
+    print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}')
 
     for i, cls_attns in enumerate(accumulated_cls_attns):
         # mean accross batch
@@ -681,7 +693,8 @@ if __name__ == '__main__':
                                                         topk_selection=args.topk_selection, early_exit=args.early_exit,
                                                         mean_heads=args.mean_heads, random_drop=args.random_drop,
                                                         small_predictor=args.small_predictor,
-                                                        predictor_vit=args.predictor_vit)
+                                                        predictor_vit=args.predictor_vit,
+                                                        predictor_kl_div_loss=args.use_kl_div_loss)
         parameter_group = utils.get_param_groups(student, args)
 
         # freeze whole model except predictor network
