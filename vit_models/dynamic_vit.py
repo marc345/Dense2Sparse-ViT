@@ -909,7 +909,7 @@ class VisionTransformerDiffPruning(nn.Module):
                         x = torch.gather(input=x, dim=1, index=naive_topk_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
                         # always keep cls token
                         # x = torch.cat((cls_x, spatial_x), dim=1)
-                        x, current_cls_attn = blk(x, return_cls_attn=True)
+                        x = blk(x)
                     ############# PATCH DROP VIA MASKED SELF ATTENTION WITH POLICY (SEE DYNAMIC VIT PAPER) #############
                     else:
                         hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 1:] * prev_decision
@@ -918,8 +918,7 @@ class VisionTransformerDiffPruning(nn.Module):
                         out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
                         cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
                         policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
-                        # x, self.current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
-                        x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
+                        x = blk(x, policy=policy)
                         prev_decision = hard_keep_decision
                 ########################################################################################################
                 ################################## PRUNING DURING INFERENCE ############################################
@@ -1128,7 +1127,7 @@ class VisionTransformerTeacher(nn.Module):
 
         return torch.stack(cls_attn_weights, dim=1)
 
-    def forward(self, x, return_final_cls_attn=False, return_cls_attns=False):
+    def forward(self, x):
         B = x.shape[0]
         # self.patch_emb_start.record()
         x = self.patch_embed(x)
@@ -1139,18 +1138,10 @@ class VisionTransformerTeacher(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
-        cls_attn_weights = []
-
         # self.encoder_start.record()
         for i, blk in enumerate(self.blocks):
-            x, cls_attns = blk(x, return_cls_attn=True)
-            cls_attn_weights.append(cls_attns.detach())
             x = blk(x)
         # self.encoder_end.record()
-
-        # return only the CLS token attention weights from the last encoder layer
-        if return_final_cls_attn:
-            return cls_attn_weights[-1]
 
         # self.head_start.record()
         feature = self.norm(x)
@@ -1160,10 +1151,7 @@ class VisionTransformerTeacher(nn.Module):
         cls = self.head(cls)
         # self.head_end.record()
 
-        if return_cls_attns:
-            return cls, tokens, cls_attn_weights
-        else:
-            return cls, tokens
+        return cls, tokens
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
