@@ -393,7 +393,7 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}')
 
     for i, cls_attns in enumerate(accumulated_cls_attns):
-        # mean accross batch
+        # mean across batch
         cls_attns = torch.mean(cls_attns, dim=0)
         # average accumulated values over whole epoch
         cls_attns = cls_attns / len(val_data_loader)
@@ -516,7 +516,7 @@ def visualize(model, teacher_model, current_epoch, test_imgs, test_labels, avg_c
         if not args.visualize_cls_attn_evo and not args.visualize_patch_drop:
             return
 
-        attention_segmentation.cls_attention_histogram(args, current_epoch+1, avg_cls_attn_list)
+        # attention_segmentation.cls_attention_histogram(args, current_epoch+1, avg_cls_attn_list)
 
         if not args.random_drop and args.cls_from_teacher:
             cls_attn_weights = teacher_model.forward_cls_attention(test_imgs.clone())  # (B, L, H, N+1)
@@ -656,6 +656,7 @@ if __name__ == '__main__':
         wandb.config.update(args)
         print(f'JOB DESCRIPTION: {wandb.run.notes}')
     else:
+        # ASD
         # check if debug job on biwidl machine
         if os.environ['USER'] == 'segerm':
             data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012"
