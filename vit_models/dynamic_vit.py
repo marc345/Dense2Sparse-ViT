@@ -531,7 +531,6 @@ class PredictorLG(nn.Module):
             scores = self.out_conv_bn(x)
             # scores = self.out_conv(x)
 
-            # logits = self.out_conv_bn(x)
             # probs = F.softmax(logits, dim=-1)
             # scores = F.softmax(probs[:, :, 1], dim=-1)
             if self.kl_div_loss:
@@ -868,11 +867,6 @@ class VisionTransformerDiffPruning(nn.Module):
                             # the 1st layer) --> only possible for random patch drop as the score is not used either way
                             pred_score = torch.zeros((B, N), device=spatial_x.device)
                         else:
-                            # # take max attention weight across all heads from CLS token for each patch
-                            # if self.mean_heads:
-                            #     current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
-                            # else:
-                            #     current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
                             # self.pred_start.record()
                             pred_logits, pred_score = self.score_predictor[p_count](
                                 # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1),
@@ -895,8 +889,6 @@ class VisionTransformerDiffPruning(nn.Module):
                                                                    policy=prev_decision).reshape(B, -1, 2)
                     #### USE OWN CLS ATTENTION WEIGHTS (FROM LAYER BEFORE PRUNING LAYER) AS PATCH IMPORTANCE METRIC ####
                     else:
-                        # pred_score = self.score_predictor[p_count](current_cls_attn[:, :, 1:].permute(0, 2, 1),
-                        #                                            policy=prev_decision).reshape(B, -1, 2)
                         pred_logits, pred_score = self.score_predictor[p_count](
                             # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1), policy=prev_decision)
                             spatial_x, policy=prev_decision)
@@ -1214,8 +1206,7 @@ def checkpoint_filter_fn(state_dict, model):
 def dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
     model = VisionTransformerDiffPruning(
             patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True, **kwargs,
-            )
+            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True, **kwargs)
     state_dict = torch.hub.load_state_dict_from_url(
         url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
         map_location="cpu", check_hash=True)
