@@ -168,8 +168,10 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 
     # for i in tqdm(range(256)):
     for i, train_data in enumerate(tqdm(train_data_loader)):
-        train_inputs = train_data[0].to(args.device)
-        train_labels = train_data[1].to(args.device)
+        train_attn_weights = train_data[1].to(args.device)
+        train_inputs = train_data[2].to(args.device)
+        train_labels = train_data[3].to(args.device)
+        # train_attn_weights = mask_test_attn_weights
         # train_inputs = mask_test_imgs
         # train_labels = mask_test_labels
 
@@ -737,7 +739,8 @@ if __name__ == '__main__':
         mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[1])
         # mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
 
-        data = {x: datasets.ImageFolder(data_dir, transform=data_transforms[x])
+        ImageFolderWithIndicesAndAttnWeights = dataset_with_indices_and_attn_weights(datasets.ImageFolder)
+        data = {x: ImageFolderWithIndicesAndAttnWeights(data_dir, transform=data_transforms[x])
                 for x in ['train', 'val']}
 
 
@@ -777,7 +780,9 @@ if __name__ == '__main__':
         mask_test_dataset = Subset(data['val'], mask_test_indices)
         mask_test_data_loader = DataLoader(mask_test_dataset, batch_size=args.batch_size)
         mask_test_data = next(iter(mask_test_data_loader))
-        mask_test_imgs, mask_test_labels = mask_test_data[0][:16], mask_test_data[1][:16]
+        mask_test_idxs, mask_test_attn_weights, mask_test_imgs, mask_test_labels \
+            = mask_test_data[0][:16], mask_test_data[1][:16], mask_test_data[2][:16], mask_test_data[3][:16]
+        mask_test_attn_weights = mask_test_attn_weights.to(args.device)
         mask_test_imgs = mask_test_imgs.to(args.device)
         mask_test_labels = mask_test_labels.to(args.device)
 
