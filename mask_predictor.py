@@ -75,6 +75,24 @@ class MyDataParallel(torch.nn.DataParallel):
         except AttributeError:
             return setattr(self.module, name, value)
 
+
+def dataset_with_indices_and_attn_weights(cls):
+    """
+    Modifies the given Dataset class to return a tuple data, target, index
+    instead of just data, target.
+    """
+
+    def __getitem__(self, index):
+        data, target = cls.__getitem__(self, index)
+        attn_weights = torch.load(
+                f'/scratch_net/biwidl215/segerm/TeacherAttentionWeights/DeiT-S16/CLS/{index}.pt',
+                map_location=torch.device('cpu'))()
+        return index, attn_weights, data, target
+
+    return type(cls.__name__, (cls,), {
+        '__getitem__': __getitem__,
+    })
+
 def get_mask_from_pred_logits(logits, keep_ratio):
     """
         input: logits, (B, N) the predicted scores for each token in the token sequences in the current batch
