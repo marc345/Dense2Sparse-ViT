@@ -61,6 +61,7 @@ data_transforms = {
     ]),
 }
 
+
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
     def __getattr__(self, name):
@@ -163,6 +164,7 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
     metrics = {}
 
     model.train()
+    teacher.eval()
 
     # for i in tqdm(range(256)):
     for i, train_data in enumerate(tqdm(train_data_loader)):
@@ -297,6 +299,7 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     TP, FP, TN, FN, = 0, 0, 0, 0
 
     model.eval()
+    teacher_model.eval()
 
     metrics = {}
     accumulated_cls_attns = None
