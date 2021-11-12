@@ -418,16 +418,22 @@ class PredictorLG(nn.Module):
                 #     nn.Softmax(dim=-1)
                 # )
             else:
-                # # large input block with batch norm
+                # deeper input block with layer norm
+                # self.in_conv_bn = nn.Sequential(
+                #     BatchNormLayer(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim*2),
+                #     self.act,
+                #     BatchNormLayer(embed_dim * 2),
+                #     nn.Linear(embed_dim*2, embed_dim*2),
+                #     self.act,
+                # )
+                # wider input block with batch norm
                 self.in_conv_bn = nn.Sequential(
                     BatchNormLayer(embed_dim),
-                    nn.Linear(embed_dim, embed_dim*2),
-                    self.act,
-                    BatchNormLayer(embed_dim * 2),
-                    nn.Linear(embed_dim*2, embed_dim*2),
+                    nn.Linear(embed_dim, embed_dim*4),
                     self.act,
                 )
-                # large input block with layer norm
+                # # deeper input block with layer norm
                 # self.in_conv = nn.Sequential(
                 #     nn.LayerNorm(embed_dim),
                 #     nn.Linear(embed_dim, embed_dim * 2),
@@ -436,10 +442,28 @@ class PredictorLG(nn.Module):
                 #     nn.Linear(embed_dim * 2, embed_dim * 2),
                 #     nn.GELU(),
                 # )
-                # large output block with batch norm
+                # # deeper output block with batch norm
+                # self.out_conv_bn = nn.Sequential(
+                #     BatchNormLayer(embed_dim*2),
+                #     nn.Linear(embed_dim*2, embed_dim*2),
+                #     self.act,
+                #     BatchNormLayer(embed_dim*2),
+                #     nn.Linear(embed_dim*2, embed_dim),
+                #     self.act,
+                #     BatchNormLayer(embed_dim),
+                #     nn.Linear(embed_dim, embed_dim//2),
+                #     self.act,
+                #     BatchNormLayer(embed_dim//2),
+                #     nn.Linear(embed_dim//2, embed_dim//4),
+                #     self.act,
+                #     BatchNormLayer(embed_dim//4),
+                #     nn.Linear(embed_dim//4, 1),
+                #     nn.Flatten(start_dim=-2, end_dim=- 1),
+                # )
+                # wider output block with batch norm
                 self.out_conv_bn = nn.Sequential(
-                    BatchNormLayer(embed_dim*2),
-                    nn.Linear(embed_dim*2, embed_dim*2),
+                    BatchNormLayer(embed_dim*4),
+                    nn.Linear(embed_dim*4, embed_dim*2),
                     self.act,
                     BatchNormLayer(embed_dim*2),
                     nn.Linear(embed_dim*2, embed_dim),
