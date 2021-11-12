@@ -402,8 +402,7 @@ class PredictorLG(nn.Module):
                     self.act,
                     BatchNormLayer(embed_dim//4),
                     nn.Linear(embed_dim//4, 1),
-                    nn.Flatten(start_dim=-2, end_dim=- 1),
-                    nn.Softmax(dim=-1)
+                    nn.Flatten(start_dim=-2, end_dim=- 1)
                 )
                 # # small output block with layer norm
                 # self.out_conv = nn.Sequential(
@@ -454,7 +453,6 @@ class PredictorLG(nn.Module):
                     BatchNormLayer(embed_dim//4),
                     nn.Linear(embed_dim//4, 1),
                     nn.Flatten(start_dim=-2, end_dim=- 1),
-                    nn.Softmax(dim=1)
                 )
                 # # large output block with layer norm
                 # self.out_conv = nn.Sequential(
