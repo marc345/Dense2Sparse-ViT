@@ -731,11 +731,11 @@ if __name__ == '__main__':
         # for pixel-wise crossentropy loss
         # as the classes (1: kept token, 0: dropped token) we use a weight for the positive class to counteract
         # this class imbalance
-        dropped_token_weights = torch.ones(size=(1,)) * args.keep_ratios[0]
-        kept_token_weights = torch.ones(size=(1,)) * (1-args.keep_ratios[0])
+        dropped_token_weights = torch.ones(size=(args.batch_size,)) * args.keep_ratios[0]/(1-args.keep_ratios[0])
+        kept_token_weights = torch.ones(size=(args.batch_size,)) * (1-args.keep_ratios[0])/args.keep_ratios[0]
         weights = torch.cat((dropped_token_weights, kept_token_weights)).to(args.device)
-        # mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[0])
-        mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
+        mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[1])
+        # mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
 
         data = {x: datasets.ImageFolder(data_dir, transform=data_transforms[x])
                 for x in ['train', 'val']}
