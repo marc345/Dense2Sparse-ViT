@@ -189,6 +189,9 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        # self.attn_start = torch.cuda.Event(enable_timing=True)
+        # self.attn_end = torch.cuda.Event(enable_timing=True)
+
     def softmax_with_policy(self, attn, policy, eps=1e-6):
         B, N, _ = policy.size()
         B, H, N, N = attn.size()
@@ -210,14 +213,16 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
+        # self.attn_start.record()
         attn = (q @ k.transpose(-2, -1)) * self.scale
-
+        # self.attn_end.record()
         if policy is None:
             attn = attn.softmax(dim=-1)
         else:
             attn = self.softmax_with_policy(attn, policy)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+
         x = self.proj(x)
         x = self.proj_drop(x)
         if return_cls_attn:
@@ -241,6 +246,15 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
+        # self.attn_start = torch.cuda.Event(enable_timing=True)
+        # self.attn_end = torch.cuda.Event(enable_timing=True)
+        # self.drop1_start = torch.cuda.Event(enable_timing=True)
+        # self.drop1_end = torch.cuda.Event(enable_timing=True)
+        # self.mlp_start = torch.cuda.Event(enable_timing=True)
+        # self.mlp_end = torch.cuda.Event(enable_timing=True)
+        # self.drop2_start = torch.cuda.Event(enable_timing=True)
+        # self.drop2_end = torch.cuda.Event(enable_timing=True)
+
     def forward(self, x, policy=None, return_cls_attn=False):
         if return_cls_attn:
             # return cls_attn in case the patch selection is based upon it and not on scores from the predictor modules
@@ -249,8 +263,18 @@ class Block(nn.Module):
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x, cls_attn
         else:
-            x = x + self.drop_path(self.attn(self.norm1(x), policy=policy))
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            # self.attn_start.record()
+            y = self.attn(self.norm1(x), policy=policy)
+            # self.attn_end.record()
+            # self.drop1_start.record()
+            x = x + self.drop_path(y)
+            # self.drop1_end.record()
+            # self.mlp_start.record()
+            y = self.mlp(self.norm2(x))
+            # self.mlp_end.record()
+            # self.drop2_start.record()
+            x = x + self.drop_path(y)
+            # self.drop2_end.record()
             return x
 
 
@@ -346,8 +370,6 @@ class PredictorLG(nn.Module):
         self.small_predictor = small_predictor
         self.k = k
         self.topk_selection = topk_selection
-        self.fwd_start = torch.cuda.Event(enable_timing=True)
-        self.fwd_end = torch.cuda.Event(enable_timing=True)
 
         if topk_selection and k is not None:
             self.act = nn.GELU()
@@ -498,7 +520,6 @@ class PredictorLG(nn.Module):
 
 
     def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
-        self.fwd_start.record()
         if self.topk_selection:
             x = self.in_conv_bn(x)
             # x = self.in_conv(x)
@@ -516,10 +537,8 @@ class PredictorLG(nn.Module):
 
             if self.training:
                 topk_scores = torch.topk(scores, self.k, dim=-1)[1]#self.topk(scores, current_sigma=current_sigma)self.topk(scores, current_sigma=current_sigma)#
-                self.fwd_end.record()
                 return scores, topk_scores
             else:
-                self.fwd_end.record()
                 return scores, scores
         else:
             x = self.in_conv(x)
@@ -589,9 +608,6 @@ class PredictorViT(nn.Module):
 
         self.transform_embed = nn.Linear(parent_embed_dim, embed_dim)
 
-        self.fwd_start = torch.cuda.Event(enable_timing=True)
-        self.fwd_end = torch.cuda.Event(enable_timing=True)
-
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
@@ -616,7 +632,6 @@ class PredictorViT(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward(self, x, policy=None, current_sigma=5e-4):
-        self.fwd_start.record()
         B = x.shape[0]
 
         x = self.transform_embed(x)
@@ -641,7 +656,6 @@ class PredictorViT(nn.Module):
         avg_cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
         max_cls_attn_weights, _ = torch.max(avg_cls_attn_weights, dim=1)  # (B, N+1)
 
-        self.fwd_end.record()
         return cls_attn_weights, max_cls_attn_weights[:, 1:]
 
 
@@ -763,6 +777,15 @@ class VisionTransformerDiffPruning(nn.Module):
         self.pruning_loc = pruning_loc
         self.token_ratio = token_ratio
 
+        # self.patch_emb_start = torch.cuda.Event(enable_timing=True)
+        # self.patch_emb_end = torch.cuda.Event(enable_timing=True)
+        # self.encoder_start = torch.cuda.Event(enable_timing=True)
+        # self.encoder_end = torch.cuda.Event(enable_timing=True)
+        # self.head_start = torch.cuda.Event(enable_timing=True)
+        # self.head_end = torch.cuda.Event(enable_timing=True)
+        # self.pred_start = torch.cuda.Event(enable_timing=True)
+        # self.pred_end = torch.cuda.Event(enable_timing=True)
+
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
@@ -788,7 +811,9 @@ class VisionTransformerDiffPruning(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward(self, x, stacked_cls_attn_weights=None):
+        # self.patch_emb_start.record()
         x = self.patch_embed(x)
+        # self.patch_emb_end.record()
         B, N, D = x.shape
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
@@ -807,6 +832,7 @@ class VisionTransformerDiffPruning(nn.Module):
         self.dropped_token_indices = None
         self.kept_token_indices = torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
 
+        # self.encoder_start.record()
         for i, blk in enumerate(self.blocks):
             ############################################################################################################
             ########################################## PRUNING ENCODER LAYER ###########################################
@@ -841,9 +867,11 @@ class VisionTransformerDiffPruning(nn.Module):
                             #     current_cls_attn = torch.mean(current_cls_attn[:, :, 1:], dim=1)
                             # else:
                             #     current_cls_attn, _ = torch.max(current_cls_attn[:, :, 1:], dim=1)
+                            # self.pred_start.record()
                             pred_logits, pred_score = self.score_predictor[p_count](
                                 # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1),
                                 spatial_x, current_sigma=self.current_sigma)  # (B, K, N)
+                            # self.pred_end.record()
                 ########################################################################################################
                 ############################### DYNAMIC VIT SCORE GENERATION ###########################################
                 ########################################################################################################
@@ -936,27 +964,28 @@ class VisionTransformerDiffPruning(nn.Module):
                     x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
                     # prev_decision = batch_index_select(prev_decision, keep_policy)  # shape: B, N, 1
                     prev_decision = torch.gather(input=prev_decision, dim=1, index=keep_policy.unsqueeze(-1))
-                    x, current_cls_attn = blk(x, return_cls_attn=True)
+                    x = blk(x)
                 p_count += 1
             ############################################################################################################
             ######################################## NON-PRUNING ENCODER LAYER #########################################
             ############################################################################################################
             else:
-                if self.training:
-                    if self.topk_selection:
-                        x, current_cls_attn = blk(x, return_cls_attn=True)
-                    else:
-                        x, current_cls_attn = blk(x, policy=policy, return_cls_attn=True)
+                if self.training and not self.topk_selection:
+                    # apply attention policy during Dynamic ViT training
+                    x = blk(x, policy=policy)
                 else:
-                    x, current_cls_attn = blk(x, return_cls_attn=True)
-            # always append a detached version of the current layer CLS token attention weights for visualizations
-            self.cls_attns.append(current_cls_attn.detach().clone())
+                    x = blk(x)
 
+        # self.encoder_end.record()
+
+        # self.head_start.record()
         x = self.norm(x)
         features = x[:, 1:]
         x = x[:, 0]
         x = self.pre_logits(x)
         x = self.head(x)
+        # self.head_end.record()
+
         if self.training:
             if self.topk_selection:
                 return x, pred_logits, features
@@ -1054,6 +1083,13 @@ class VisionTransformerTeacher(nn.Module):
         # Classifier head
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
+        # self.patch_emb_start = torch.cuda.Event(enable_timing=True)
+        # self.patch_emb_end = torch.cuda.Event(enable_timing=True)
+        # self.encoder_start = torch.cuda.Event(enable_timing=True)
+        # self.encoder_end = torch.cuda.Event(enable_timing=True)
+        # self.head_start = torch.cuda.Event(enable_timing=True)
+        # self.head_end = torch.cuda.Event(enable_timing=True)
+
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
@@ -1096,7 +1132,9 @@ class VisionTransformerTeacher(nn.Module):
 
     def forward(self, x, return_final_cls_attn=False, return_cls_attns=False):
         B = x.shape[0]
+        # self.patch_emb_start.record()
         x = self.patch_embed(x)
+        # self.patch_emb_end.record()
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
@@ -1105,20 +1143,24 @@ class VisionTransformerTeacher(nn.Module):
 
         cls_attn_weights = []
 
+        # self.encoder_start.record()
         for i, blk in enumerate(self.blocks):
             x, cls_attns = blk(x, return_cls_attn=True)
             cls_attn_weights.append(cls_attns.detach())
             x = blk(x)
+        # self.encoder_end.record()
 
         # return only the CLS token attention weights from the last encoder layer
         if return_final_cls_attn:
             return cls_attn_weights[-1]
 
+        # self.head_start.record()
         feature = self.norm(x)
         cls = feature[:, 0]
         tokens = feature[:, 1:]
         cls = self.pre_logits(cls)
         cls = self.head(cls)
+        # self.head_end.record()
 
         if return_cls_attns:
             return cls, tokens, cls_attn_weights

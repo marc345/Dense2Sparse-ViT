@@ -158,45 +158,27 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 
     running_loss, running_acc, running_keeping_ratio, running_mask_loss, running_mask_acc, running_cls_loss = \
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    running_fwd_time, running_bwd_time, running_teacher_fwd_time, running_pred_fwd_time = 0.0, 0.0, 0.0, 0.0
     TP, FP, TN, FN = 0, 0, 0, 0
 
     metrics = {}
 
     model.train()
 
-    # right way to record execution time of cuda operations:
-    # https://discuss.pytorch.org/t/how-to-measure-time-in-pytorch/26964/11
-    fwd_start = torch.cuda.Event(enable_timing=True)
-    fwd_end = torch.cuda.Event(enable_timing=True)
-    bwd_start = torch.cuda.Event(enable_timing=True)
-    bwd_end = torch.cuda.Event(enable_timing=True)
-
-    # for i in tqdm(range(1)):
+    # for i in tqdm(range(256)):
     for i, train_data in enumerate(tqdm(train_data_loader)):
         train_inputs = train_data[0].to(args.device)
         train_labels = train_data[1].to(args.device)
         # train_inputs = mask_test_imgs
         # train_labels = mask_test_labels
 
-        fwd_start.record()
-        cls_attn_weights = teacher_model.forward_cls_attention(train_inputs.clone())  # (B, L, H, N+1)
-        fwd_end.record()
-        torch.cuda.synchronize()
-        running_teacher_fwd_time += fwd_start.elapsed_time(fwd_end)
+        cls_attn_weights = train_attn_weights  # (B, L, H, N+1)
 
-        fwd_start.record()
         if args.cls_from_teacher:
             # forward with CLS attention weights from unpruned teacher network
             outputs = model(train_inputs.clone(), cls_attn_weights)
         else:
             # forward
             outputs = model(train_inputs.clone())
-        fwd_end.record()
-        # Waits for everything to finish running
-        torch.cuda.synchronize()
-        running_fwd_time += fwd_start.elapsed_time(fwd_end)
-        running_pred_fwd_time += list(model.children())[-1][0].fwd_start.elapsed_time(list(model.children())[-1][0].fwd_end)
 
         pred_logits = outputs[-2]
 
@@ -217,7 +199,6 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
             for l in range(pred_logits.shape[1]):
                 new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
             new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
-
             mask_loss = 100 * F.mse_loss(max_pred_cls_attn, new_cls_attn_weights, reduction='mean')
         else:
             pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
@@ -234,12 +215,7 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 
         # zero the parameter gradients
         optimizer.zero_grad()
-        bwd_start.record()
         train_loss.backward()
-        bwd_end.record()
-        # Waits for everything to finish running
-        torch.cuda.synchronize()
-        running_bwd_time += bwd_start.elapsed_time(bwd_end)
         optimizer.step()
         preds = torch.argmax(outputs[0].detach(), dim=1)
 
@@ -300,11 +276,7 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
         metrics['kept_token_ratio'] = running_keeping_ratio / len(train_data_loader)
         print(f'kept token ratio: {metrics["kept_token_ratio"]:.4f}')
 
-    print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}, '
-          f'avg unpruned fwd pass took: {(running_teacher_fwd_time / len(train_data_loader)):.2f} ms, '
-          f'avg forward pass took {(running_fwd_time / len(train_data_loader)):.2f} ms, '
-          f'avg backward pass took {(running_bwd_time / len(train_data_loader)):.2f} ms, '
-          f'avg predictor forward pass took {(running_pred_fwd_time / len(train_data_loader)):.2f} ms')
+    print(f'train loss: {metrics["train_loss"]:.4f}, acc: {metrics["train_acc"]:.4f}')
 
     return metrics
 
@@ -315,7 +287,6 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
     running_loss, running_acc, running_mask_acc, running_mask_loss = 0.0, 0.0, 0.0, 0.0
-    running_fwd_time, running_teacher_fwd_time, running_pred_fwd_time = 0.0, 0.0, 0.0
 
     TP, FP, TN, FN, = 0, 0, 0, 0
 
@@ -324,35 +295,19 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     metrics = {}
     accumulated_cls_attns = None
 
-    fwd_start = torch.cuda.Event(enable_timing=True)
-    fwd_end = torch.cuda.Event(enable_timing=True)
-
-    for val_inputs, val_labels in tqdm(val_data_loader):
     # for i in tqdm(range(1)):
         # val_inputs = mask_test_imgs
         # val_labels = mask_test_labels
         val_inputs = val_inputs.to(args.device)
         val_labels = val_labels.to(args.device)
 
-        fwd_start.record()
-        cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  # (B, L, H, N+1)
-        fwd_end.record()
-        torch.cuda.synchronize()
-        running_teacher_fwd_time += fwd_start.elapsed_time(fwd_end)
 
         gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
 
-        fwd_start.record()
         if not args.random_drop and args.cls_from_teacher:
             outputs = model(val_inputs.clone(), cls_attn_weights)
         else:
             outputs = model(val_inputs.clone())
-        fwd_end.record()
-        # Waits for everything to finish running
-        torch.cuda.synchronize()
-        running_fwd_time += fwd_start.elapsed_time(fwd_end)
-        # get saved forward time from model's predictor submodule fwd_time attribute
-        running_pred_fwd_time += list(model.children())[-1][0].fwd_start.elapsed_time(list(model.children())[-1][0].fwd_end)
 
         logits, cls_attns, pred_logits, _ = outputs
 
@@ -419,9 +374,6 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
     args.epoch_acc = metrics['val_acc']  # for title of visualization plot
     print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}, '
-          f'avg unpruned forward pass took {(running_teacher_fwd_time / len(val_data_loader)):.2f} ms, '
-          f'avg forward pass took {(running_fwd_time / len(val_data_loader)):.2f} ms, '
-          f'avg predictor forward pass took {(running_pred_fwd_time / len(val_data_loader)):.2f} ms')
 
     for i, cls_attns in enumerate(accumulated_cls_attns):
         # mean accross batch
@@ -436,6 +388,105 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     # accumulated_cls_attns[0].shape = (H, N+1)
 
     return metrics, accumulated_cls_attns
+
+
+#######################################################################################################################
+#######################################################################################################################
+
+def evaluate_timing(args, model, teacher_model, val_data_loader):
+
+    model.eval()
+    teacher_model.eval()
+
+    fwd_start = torch.cuda.Event(enable_timing=True)
+    fwd_end = torch.cuda.Event(enable_timing=True)
+
+    fwd_time, patch_emb_time, attn_time, drop1_time, mlp_time, drop2_time, encoder_time, head_time, pred_time, \
+        pure_attn_time = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+    teacher_fwd_time, teacher_patch_emb_time, teacher_encoder_time, teacher_attn_time, teacher_drop1_time, \
+        teacher_mlp_time, teacher_drop2_time, teacher_head_time, teacher_pure_attn_time = 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+    for val_idxs, val_attn_weights, val_inputs, val_labels in tqdm(val_data_loader):
+        val_attn_weights = val_attn_weights.to(args.device)
+        val_inputs = val_inputs.to(args.device)
+
+        fwd_start.record()
+        _ = teacher_model(val_inputs.clone())
+        fwd_end.record()
+        torch.cuda.synchronize()
+        teacher_fwd_time += fwd_start.elapsed_time(fwd_end)
+        teacher_patch_emb_time += teacher_model.patch_emb_start.elapsed_time(teacher_model.patch_emb_end)
+        teacher_encoder_time += teacher_model.encoder_start.elapsed_time(teacher_model.encoder_end)
+        teacher_head_time += teacher_model.head_start.elapsed_time(teacher_model.head_end)
+        for blk in list(teacher_model.children())[2]:
+            teacher_attn_time += blk.attn_start.elapsed_time(blk.attn_end)
+            teacher_drop1_time += blk.drop1_start.elapsed_time(blk.drop1_end)
+            teacher_mlp_time += blk.mlp_start.elapsed_time(blk.mlp_end)
+            teacher_drop2_time += blk.drop2_start.elapsed_time(blk.drop2_end)
+            teacher_pure_attn_time += blk.attn.attn_start.elapsed_time(blk.attn.attn_end)
+
+        fwd_start.record()
+        _ = model(val_inputs.clone())
+        fwd_end.record()
+        # Waits for everything to finish running
+        torch.cuda.synchronize()
+        fwd_time += fwd_start.elapsed_time(fwd_end)
+        patch_emb_time += model.patch_emb_start.elapsed_time(model.patch_emb_end)
+        encoder_time += model.encoder_start.elapsed_time(model.encoder_end)
+        head_time += model.head_start.elapsed_time(model.head_end)
+        for blk in list(model.children())[2]:
+            attn_time += blk.attn_start.elapsed_time(blk.attn_end)
+            drop1_time += blk.drop1_start.elapsed_time(blk.drop1_end)
+            mlp_time += blk.mlp_start.elapsed_time(blk.mlp_end)
+            drop2_time += blk.drop2_start.elapsed_time(blk.drop2_end)
+            pure_attn_time += blk.attn.attn_start.elapsed_time(blk.attn.attn_end)
+        # get saved forward time from model's predictor submodule fwd_time attribute
+        pred_time += model.pred_start.elapsed_time(model.pred_end)
+
+    teacher_fwd_time /= len(val_data_loader)
+    teacher_patch_emb_time /= len(val_data_loader)
+    teacher_encoder_time /= len(val_data_loader)
+    teacher_head_time /= len(val_data_loader)
+    teacher_attn_time /= len(val_data_loader)
+    teacher_drop1_time /= len(val_data_loader)
+    teacher_mlp_time /= len(val_data_loader)
+    teacher_drop2_time /= len(val_data_loader)
+    teacher_pure_attn_time /= len(val_data_loader)
+
+    fwd_time /= len(val_data_loader)
+    pred_time /= len(val_data_loader)
+    patch_emb_time /= len(val_data_loader)
+    encoder_time /= len(val_data_loader)
+    head_time /= len(val_data_loader)
+    attn_time /= len(val_data_loader)
+    drop1_time /= len(val_data_loader)
+    mlp_time /= len(val_data_loader)
+    drop2_time /= len(val_data_loader)
+    pure_attn_time /= len(val_data_loader)
+
+    print(f'avg unpruned forward pass took {teacher_fwd_time:.2f} ms, '
+          f'avg unpruned patch embedding took {teacher_patch_emb_time:.2f} ms, '
+          f'avg unpruned encoder took {teacher_encoder_time:.2f} ms, '
+          f'avg unpruned MHSA block took {teacher_attn_time:.2f} ms, '
+          f'avg unpruned pure attention took {teacher_pure_attn_time:.2f} ms, '
+          f'avg unpruned dropout 1 took {teacher_drop1_time:.2f} ms, '
+          f'avg unpruned MLP block took {teacher_mlp_time:.2f} ms, '
+          f'avg unpruned dropout 2 took {teacher_drop2_time:.2f} ms, '
+          f'avg unpruned classifier head took {teacher_head_time:.2f} ms\n')
+
+    print(f'avg forward pass took {fwd_time:.2f} ms, '
+          f'avg patch embedding took {patch_emb_time:.2f} ms, '
+          f'avg encoder took {encoder_time:.2f} ms, '
+          f'avg predictor took {pred_time:.2f} ms, '
+          f'avg MHSA block took {attn_time:.2f} ms, '
+          f'avg pure attention took {pure_attn_time:.2f} ms, '
+          f'avg dropout 1 took {drop1_time:.2f} ms, '
+          f'avg MLP block took {mlp_time:.2f} ms, '
+          f'avg dropout 2 took {drop2_time:.2f} ms, '
+         f'avg classifier head took {head_time:.2f} ms')
+
+    return
 
 #######################################################################################################################
 #######################################################################################################################
@@ -744,6 +795,10 @@ if __name__ == '__main__':
             if args.topk_selection:
                 # linearly decay sigma of top-k module during training
                 student.current_sigma = args.current_sigma
+
+
+            # evaluate_timing(args, student, teacher, data_loaders['val'])
+            # continue
 
             train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'],
                                             mask_loss_fn, dynamic_vit_loss, optim)
