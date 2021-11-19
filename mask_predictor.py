@@ -805,7 +805,7 @@ if __name__ == '__main__':
         print(f"Start training for {args.epochs} epochs, with batch size of {args.batch_size}")
 
         since = time.time()
-        best_acc = 0.0
+        best_acc, best_mask_acc = 0.0, 0.0
 
         for epoch in range(args.epochs):
             print('Epoch {}/{}'.format(epoch + 1, args.epochs))
@@ -832,6 +832,8 @@ if __name__ == '__main__':
             epoch_metrics = dict(train_metrics, **val_metrics)
             if epoch_metrics['val_acc'] > best_acc:
                 best_acc = epoch_metrics['val_acc']
+            if epoch_metrics['val_mask_acc'] > best_acc:
+                best_mask_acc = epoch_metrics['val_mask_acc']
 
             if args.is_sbatch and args.wandb:
                 # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
@@ -841,6 +843,7 @@ if __name__ == '__main__':
         time_elapsed = time.time() - since
         if args.is_sbatch and args.wandb:
             wandb.run.summary["best_accuracy"] = best_acc
+            wandb.run.summary["best_mask_accuracy"] = best_mask_acc
         print(f'Training complete in {(time_elapsed // 60):.0f}m {(time_elapsed % 60):.0f}s')
         print(f'Best val acc: {best_acc:4f}')
 
