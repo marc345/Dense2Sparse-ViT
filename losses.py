@@ -61,7 +61,7 @@ class DistillDiffPruningLoss(torch.nn.Module):
             print('using dynamic loss')
 
         if self.topk_selection:
-            print('using differentiable top-k instead of gumbel softmax for patch importance selection')
+            print('using differentiable top-k instead of Gumbel softmax for patch importance selection')
 
     def forward(self, inputs, outputs, labels):
         """
