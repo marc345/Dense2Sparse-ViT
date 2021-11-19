@@ -196,34 +196,47 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
         gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
         patch_wise_labels = gt_patch_drop_mask.long().to(args.device)
 
-        if args.predictor_vit:
-            avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
-            max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
-            pred_keep_mask = get_mask_from_pred_logits(max_pred_cls_attn[:, 1:], args.keep_ratios[0])
+        if args.topk_selection:
+            if args.predictor_vit:
+                # predictor network in form of ViT
+                avg_pred_cls_attn = torch.mean(pred_logits, dim=1)
+                max_pred_cls_attn, _ = torch.max(avg_pred_cls_attn, dim=1)
+                pred_keep_mask = get_mask_from_pred_logits(max_pred_cls_attn[:, 1:], args.keep_ratios[0])
 
-            new_cls_attn_weights = []
-            for l in range(pred_logits.shape[1]):
-                new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
-            new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
-            mask_loss = 100 * F.mse_loss(max_pred_cls_attn, new_cls_attn_weights, reduction='mean')
-
-        else:
-
-            if not args.use_kl_div_loss:
-                pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
-                # pred_logits = torch.stack((1-pred_logits, pred_logits), dim=-1)
-                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
-                                           patch_wise_labels.float().flatten())
+                new_cls_attn_weights = []
+                for l in range(pred_logits.shape[1]):
+                    new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
+                new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
+                mask_loss = 100 * F.mse_loss(max_pred_cls_attn, new_cls_attn_weights, reduction='mean')
             else:
-                pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
-                cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
-                cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
-                renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1, keepdim=True)
-                # mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
-                mask_loss = 1000 * F.kl_div(F.log_softmax(pred_logits, dim=-1), torch.log(renormalized_cls), log_target=True)
-
-        cls_loss = F.cross_entropy(outputs[0], train_labels)
-        train_loss = mask_loss #+ cls_loss#mask_loss +
+                # predictor network in form of a MLP
+                if args.use_kl_div_loss:
+                    # KL div loss for keep mask prediction task
+                    pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
+                    cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+                    cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+                    renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1, keepdim=True)
+                    temp = 1e-2
+                    mask_loss = F.kl_div(F.log_softmax(pred_logits, dim=-1), torch.log(renormalized_cls),
+                                                log_target=True, reduction='batchmean')
+                elif args.use_mse_loss:
+                    # MSE loss for keep mask prediction task
+                    pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
+                    cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+                    cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+                    renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1, keepdim=True)
+                    mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
+                else:
+                    # BCE loss for keep mask prediction task
+                    pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+                    mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
+                                               patch_wise_labels.float().flatten())
+        else:
+            # BCE loss for keep mask prediction task
+            pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1)[:, :, 0], args.keep_ratios[0])
+            mask_loss = mask_criterion(F.softmax(pred_logits, dim=-1)[:, :, 0].flatten(start_dim=0, end_dim=1),
+                                       patch_wise_labels.float().flatten())
+        cls_loss = F.cross_entropy(logits_s, train_labels)
 
         # zero the parameter gradients
         optimizer.zero_grad()
@@ -344,20 +357,27 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
             for l in range(pred_logits.shape[1]):
                 new_cls_attn_weights.append(cls_attn_weights[:, l + args.pruning_locs[0]])
             new_cls_attn_weights = torch.stack(new_cls_attn_weights, dim=1)
-
-            mask_loss = 100 * F.mse_loss(pred_logits, renormalized_cls, reduction='sum')
+            mask_loss = 100 * F.mse_loss(pred_logits, new_cls_attn_weights, reduction='sum')
         else:
-            if not args.use_kl_div_loss:
-                pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
-                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
-                                           patch_wise_labels.float().flatten())
-            else:
+            if args.use_kl_div_loss:
+                # KL div loss for keep mask prediction task
                 pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
                 cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
                 cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
                 renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=1, keepdim=True)
-                # mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
                 mask_loss = 1000 * F.kl_div(F.log_softmax(pred_logits, dim=-1), torch.log(renormalized_cls), log_target=True)
+            elif args.use_mse_loss:
+                # MSE loss for keep mask prediction task
+                pred_keep_mask = get_mask_from_pred_logits(F.softmax(pred_logits, dim=-1), args.keep_ratios[0])
+                cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+                cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+                renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=1, keepdim=True)
+                mask_loss = 100 * F.mse_loss(F.softmax(pred_logits, dim=-1), renormalized_cls, reduction='sum')
+            else:
+                # BCE div loss for keep mask prediction task
+                pred_keep_mask = get_mask_from_pred_logits(pred_logits, args.keep_ratios[0])
+                mask_loss = mask_criterion(pred_logits.flatten(start_dim=0, end_dim=1),
+                                           patch_wise_labels.float().flatten())
 
         if accumulated_cls_attns is None:
             accumulated_cls_attns = cls_attns.copy()
