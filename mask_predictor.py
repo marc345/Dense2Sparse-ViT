@@ -780,7 +780,7 @@ if __name__ == '__main__':
         dropped_token_weights = torch.ones(size=(args.batch_size,)) * args.keep_ratios[0]/(1-args.keep_ratios[0])
         kept_token_weights = torch.ones(size=(args.batch_size,)) * (1-args.keep_ratios[0])/args.keep_ratios[0]
         weights = torch.cat((dropped_token_weights, kept_token_weights)).to(args.device)
-        mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[1])
+        mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[1], reduction='mean')
         # mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
 
         ImageFolderWithIndicesAndAttnWeights = dataset_with_indices_and_attn_weights(datasets.ImageFolder)
