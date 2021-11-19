@@ -57,7 +57,6 @@ data_transforms = {
     'val': transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
-        transforms.ToTensor()
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ]),
@@ -170,10 +169,8 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 
     # for i in tqdm(range(256)):
     for i, train_data in enumerate(tqdm(train_data_loader)):
-        train_attn_weights = train_data[1].to(args.device)
-        train_inputs = train_data[2].to(args.device)
-        train_labels = train_data[3].to(args.device)
-        # train_attn_weights = mask_test_attn_weights
+        train_inputs = train_data[0].to(args.device)
+        train_labels = train_data[1].to(args.device)
         # train_inputs = mask_test_imgs
         # train_labels = mask_test_labels
 
@@ -626,6 +623,8 @@ if __name__ == '__main__':
 
         # loss function used for predicted mask vs. ground truth mask from averaged teacher CLS attention
         if args.use_kl_div_loss:
+            args.patch_selection_method += f'_kl'
+        elif args.use_mse_loss:
             args.patch_selection_method += f'_mse'
         else:
             args.patch_selection_method += f'_bce_ce'
@@ -722,7 +721,8 @@ if __name__ == '__main__':
                                                         mean_heads=args.mean_heads, random_drop=args.random_drop,
                                                         small_predictor=args.small_predictor,
                                                         predictor_vit=args.predictor_vit,
-                                                        predictor_kl_div_loss=args.use_kl_div_loss)
+                                                        predictor_kl_div_loss=args.use_kl_div_loss or args.use_mse_loss,
+                                                        predictor_bn=args.predictor_bn)
         parameter_group = utils.get_param_groups(student, args)
 
         # freeze whole model except predictor network
@@ -763,8 +763,11 @@ if __name__ == '__main__':
         # mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
 
         ImageFolderWithIndicesAndAttnWeights = dataset_with_indices_and_attn_weights(datasets.ImageFolder)
-        data = {x: ImageFolderWithIndicesAndAttnWeights(data_dir, transform=data_transforms[x])
-                for x in ['train', 'val']}
+        data = {
+            'train': datasets.ImageFolder(data_dir, transform=data_transforms['train']),
+            # 'val': ImageFolderWithIndicesAndAttnWeights(data_dir, transform=data_transforms['val'])
+            'val': datasets.ImageFolder(data_dir, transform=data_transforms['val'])
+        }
 
 
         # obtain training indices that will be used for validation
@@ -803,9 +806,10 @@ if __name__ == '__main__':
         mask_test_dataset = Subset(data['val'], mask_test_indices)
         mask_test_data_loader = DataLoader(mask_test_dataset, batch_size=args.batch_size)
         mask_test_data = next(iter(mask_test_data_loader))
-        mask_test_idxs, mask_test_attn_weights, mask_test_imgs, mask_test_labels \
-            = mask_test_data[0][:16], mask_test_data[1][:16], mask_test_data[2][:16], mask_test_data[3][:16]
-        mask_test_attn_weights = mask_test_attn_weights.to(args.device)
+        # mask_test_idx, mask_test_attn_weights, mask_test_imgs, mask_test_labels \
+        #     = mask_test_data[0][:16], mask_test_data[1][:16], mask_test_data[2][:16], mask_test_data[3][:16]
+        mask_test_imgs, mask_test_labels = mask_test_data[0][:16], mask_test_data[1][:16]
+        # mask_test_attn_weights = mask_test_attn_weights.to(args.device)
         mask_test_imgs = mask_test_imgs.to(args.device)
         mask_test_labels = mask_test_labels.to(args.device)
 
