@@ -609,6 +609,38 @@ class PredictorLG(nn.Module):
             return logits, F.log_softmax(logits, dim=-1)
 
 
+# class PredictorCNN(nn.Module):
+#     """ Image to Patch Embedding
+#     """
+#     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
+#         super().__init__()
+#         img_size = to_2tuple(img_size)
+#         patch_size = to_2tuple(patch_size)
+#         num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+#         self.img_size = img_size
+#         self.patch_size = patch_size
+#         self.num_patches = num_patches
+# 
+#         self.proj = nn.Sequential(
+#             nn.Conv2d(3, 64, kernel_size=5),
+#             nn.MaxPool2d(2, 2),
+#             nn.ReLU(),
+#             nn.BatchNorm2d(64),
+#             nn.Conv2d(64, 32, kernel_size=5),
+#             nn.MaxPool2d(2, 2),
+#             nn.BatchNorm2d(32),
+#             nn.Conv2d(32, 16, kernel_size=5),
+#             nn.MaxPool2d(2, 2),
+#         )
+# 
+#     def forward(self, x):
+#         B, C, H, W = x.shape
+#         # FIXME look at relaxing size constraints
+#         assert H == self.img_size[0] and W == self.img_size[1], \
+#             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+#         x = self.proj(x).flatten(2).transpose(1, 2)
+#         return x
+
 class PredictorViT(nn.Module):
     """ Vision Transformer
 
