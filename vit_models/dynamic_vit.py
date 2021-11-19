@@ -365,7 +365,7 @@ class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
     def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False, small_predictor=False,
-                 kl_div_loss=False):
+                 kl_div_loss=False, use_bn=False):
         super().__init__()
 
         self.small_predictor = small_predictor
@@ -380,127 +380,154 @@ class PredictorLG(nn.Module):
 
             if small_predictor:
                 # small input block with batch norm
-                self.in_conv_bn = nn.Sequential(
-                    BatchNormLayer(embed_dim),
-                    nn.Linear(embed_dim, embed_dim),
-                    self.act
-                )
-                # # small input block with layer norm
-                # self.in_conv = nn.Sequential(
-                #     nn.LayerNorm(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim),
-                #     nn.GELU()
-                # )
+                if use_bn:
+                    self.in_conv = nn.Sequential(
+                        BatchNormLayer(embed_dim),
+                        nn.Linear(embed_dim, embed_dim),
+                        self.act
+                    )
 
-                # small output block with batch norm
-                self.out_conv_bn = nn.Sequential(
-                    BatchNormLayer(embed_dim),
-                    nn.Linear(embed_dim, embed_dim//2),
-                    self.act,
-                    BatchNormLayer(embed_dim//2),
-                    nn.Linear(embed_dim//2, embed_dim//4),
-                    self.act,
-                    BatchNormLayer(embed_dim//4),
-                    nn.Linear(embed_dim//4, 1),
-                    nn.Flatten(start_dim=-2, end_dim=- 1)
-                )
-                # # small output block with layer norm
-                # self.out_conv = nn.Sequential(
-                #     nn.LayerNorm(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim // 2),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim // 2),
-                #     nn.Linear(embed_dim // 2, embed_dim // 4),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim // 4),
-                #     nn.Linear(embed_dim // 4, 1),
-                #     nn.Flatten(start_dim=-2, end_dim=- 1),
-                #     nn.Softmax(dim=-1)
-                # )
+                    # small output block with batch norm
+                    self.out_conv = nn.Sequential(
+                        BatchNormLayer(embed_dim),
+                        nn.Linear(embed_dim, embed_dim // 2),
+                        self.act,
+                        BatchNormLayer(embed_dim // 2),
+                        nn.Linear(embed_dim // 2, embed_dim // 4),
+                        self.act,
+                        BatchNormLayer(embed_dim // 4),
+                        nn.Linear(embed_dim // 4, 1),
+                        nn.Flatten(start_dim=-2, end_dim=- 1)
+                    )
+                else:
+                    # small input block with layer norm
+                    self.in_conv = nn.Sequential(
+                        nn.LayerNorm(embed_dim),
+                        nn.Linear(embed_dim, embed_dim),
+                        nn.GELU()
+                    )
+
+                    # small output block with layer norm
+                    self.out_conv = nn.Sequential(
+                        nn.LayerNorm(embed_dim),
+                        nn.Linear(embed_dim, embed_dim // 2),
+                        nn.GELU(),
+                        nn.LayerNorm(embed_dim // 2),
+                        nn.Linear(embed_dim // 2, embed_dim // 4),
+                        nn.GELU(),
+                        nn.LayerNorm(embed_dim // 4),
+                        nn.Linear(embed_dim // 4, 1),
+                        nn.Flatten(start_dim=-2, end_dim=- 1)
+                    )
             else:
-                # deeper input block with layer norm
-                # self.in_conv_bn = nn.Sequential(
-                #     BatchNormLayer(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim*2),
-                #     self.act,
-                #     BatchNormLayer(embed_dim * 2),
-                #     nn.Linear(embed_dim*2, embed_dim*2),
-                #     self.act,
-                # )
-                # wider input block with batch norm
-                self.in_conv_bn = nn.Sequential(
-                    BatchNormLayer(embed_dim),
-                    nn.Linear(embed_dim, embed_dim*4),
-                    self.act,
-                )
-                # # deeper input block with layer norm
-                # self.in_conv = nn.Sequential(
-                #     nn.LayerNorm(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim * 2),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim * 2),
-                #     nn.Linear(embed_dim * 2, embed_dim * 2),
-                #     nn.GELU(),
-                # )
-                # # deeper output block with batch norm
-                # self.out_conv_bn = nn.Sequential(
-                #     BatchNormLayer(embed_dim*2),
-                #     nn.Linear(embed_dim*2, embed_dim*2),
-                #     self.act,
-                #     BatchNormLayer(embed_dim*2),
-                #     nn.Linear(embed_dim*2, embed_dim),
-                #     self.act,
-                #     BatchNormLayer(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim//2),
-                #     self.act,
-                #     BatchNormLayer(embed_dim//2),
-                #     nn.Linear(embed_dim//2, embed_dim//4),
-                #     self.act,
-                #     BatchNormLayer(embed_dim//4),
-                #     nn.Linear(embed_dim//4, 1),
-                #     nn.Flatten(start_dim=-2, end_dim=- 1),
-                # )
-                # wider output block with batch norm
-                self.out_conv_bn = nn.Sequential(
-                    BatchNormLayer(embed_dim*4),
-                    nn.Linear(embed_dim*4, embed_dim*2),
-                    self.act,
-                    BatchNormLayer(embed_dim*2),
-                    nn.Linear(embed_dim*2, embed_dim),
-                    self.act,
-                    BatchNormLayer(embed_dim),
-                    nn.Linear(embed_dim, embed_dim//2),
-                    self.act,
-                    BatchNormLayer(embed_dim//2),
-                    nn.Linear(embed_dim//2, embed_dim//4),
-                    self.act,
-                    BatchNormLayer(embed_dim//4),
-                    nn.Linear(embed_dim//4, 1),
-                    nn.Flatten(start_dim=-2, end_dim=- 1),
-                )
-                # # large output block with layer norm
-                # self.out_conv = nn.Sequential(
-                #     nn.LayerNorm(embed_dim * 2),
-                #     nn.Linear(embed_dim * 2, embed_dim * 2),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim * 2),
-                #     nn.Linear(embed_dim * 2, embed_dim),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim),
-                #     nn.Linear(embed_dim, embed_dim // 2),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim // 2),
-                #     nn.Linear(embed_dim // 2, embed_dim // 4),
-                #     nn.GELU(),
-                #     nn.LayerNorm(embed_dim // 4),
-                #     nn.Linear(embed_dim // 4, 1),
-                #     nn.Flatten(start_dim=-2, end_dim=- 1),
-                #     nn.Softmax(dim=1)
-                # )
+                if use_bn:
+                    # # deeper input block with layer norm
+                    # self.in_conv = nn.Sequential(
+                    #     BatchNormLayer(embed_dim),
+                    #     nn.Linear(embed_dim, embed_dim*2),
+                    #     self.act,
+                    #     BatchNormLayer(embed_dim * 2),
+                    #     nn.Linear(embed_dim*2, embed_dim*2),
+                    #     self.act,
+                    # )
+                    # wider input block with batch norm
+                    self.in_conv = nn.Sequential(
+                        BatchNormLayer(embed_dim),
+                        nn.Linear(embed_dim, embed_dim*4),
+                        self.act,
+                    )
+                    # # deeper output block with batch norm
+                    # self.out_conv = nn.Sequential(
+                    #     BatchNormLayer(embed_dim*2),
+                    #     nn.Linear(embed_dim*2, embed_dim*2),
+                    #     self.act,
+                    #     BatchNormLayer(embed_dim*2),
+                    #     nn.Linear(embed_dim*2, embed_dim),
+                    #     self.act,
+                    #     BatchNormLayer(embed_dim),
+                    #     nn.Linear(embed_dim, embed_dim//2),
+                    #     self.act,
+                    #     BatchNormLayer(embed_dim//2),
+                    #     nn.Linear(embed_dim//2, embed_dim//4),
+                    #     self.act,
+                    #     BatchNormLayer(embed_dim//4),
+                    #     nn.Linear(embed_dim//4, 1),
+                    #     nn.Flatten(start_dim=-2, end_dim=- 1),
+                    # )
+                    # wider output block with batch norm
+                    self.out_conv = nn.Sequential(
+                        BatchNormLayer(embed_dim * 4),
+                        nn.Linear(embed_dim * 4, embed_dim * 2),
+                        self.act,
+                        BatchNormLayer(embed_dim * 2),
+                        nn.Linear(embed_dim * 2, embed_dim),
+                        self.act,
+                        BatchNormLayer(embed_dim),
+                        nn.Linear(embed_dim, embed_dim // 2),
+                        self.act,
+                        BatchNormLayer(embed_dim // 2),
+                        nn.Linear(embed_dim // 2, embed_dim // 4),
+                        self.act,
+                        BatchNormLayer(embed_dim // 4),
+                        nn.Linear(embed_dim // 4, 1),
+                        nn.Flatten(start_dim=-2, end_dim=- 1),
+                    )
+                else:
+                    # # deeper input block with layer norm
+                    # self.in_conv = nn.Sequential(
+                    #     nn.LayerNorm(embed_dim),
+                    #     nn.Linear(embed_dim, embed_dim * 2),
+                    #     nn.GELU(),
+                    #     nn.LayerNorm(embed_dim * 2),
+                    #     nn.Linear(embed_dim * 2, embed_dim * 2),
+                    #     nn.GELU(),
+                    # )
+                    # wider input block with layer norm
+                    self.in_conv = nn.Sequential(
+                        nn.LayerNorm(embed_dim),
+                        nn.Linear(embed_dim, embed_dim * 4),
+                        self.act,
+                    )
+                    # # deeper output block with layer norm
+                    # self.out_conv = nn.Sequential(
+                    #     nn.LayerNorm(embed_dim * 2),
+                    #     nn.Linear(embed_dim * 2, embed_dim * 2),
+                    #     nn.GELU(),
+                    #     nn.LayerNorm(embed_dim * 2),
+                    #     nn.Linear(embed_dim * 2, embed_dim),
+                    #     nn.GELU(),
+                    #     nn.LayerNorm(embed_dim),
+                    #     nn.Linear(embed_dim, embed_dim // 2),
+                    #     nn.GELU(),
+                    #     nn.LayerNorm(embed_dim // 2),
+                    #     nn.Linear(embed_dim // 2, embed_dim // 4),
+                    #     nn.GELU(),
+                    #     nn.LayerNorm(embed_dim // 4),
+                    #     nn.Linear(embed_dim // 4, 1),
+                    #     nn.Flatten(start_dim=-2, end_dim=- 1)
+                    # )
+                    # wider output block with layer norm
+                    self.out_conv = nn.Sequential(
+                        nn.LayerNorm(embed_dim * 4),
+                        nn.Linear(embed_dim * 4, embed_dim * 2),
+                        self.act,
+                        nn.LayerNorm(embed_dim * 2),
+                        nn.Linear(embed_dim * 2, embed_dim),
+                        self.act,
+                        nn.LayerNorm(embed_dim),
+                        nn.Linear(embed_dim, embed_dim // 2),
+                        self.act,
+                        nn.LayerNorm(embed_dim // 2),
+                        nn.Linear(embed_dim // 2, embed_dim // 4),
+                        self.act,
+                        nn.LayerNorm(embed_dim // 4),
+                        nn.Linear(embed_dim // 4, 1),
+                        nn.Flatten(start_dim=-2, end_dim=- 1),
+                    )
 
             self.topk = PerturbedTopK(k)
         elif only_cls_features:
-            self.out_conv_bn = nn.Sequential(
+            self.out_conv = nn.Sequential(
                 nn.Linear(6, 32),
                 nn.GELU(),
                 nn.Linear(32, 32),
@@ -545,18 +572,13 @@ class PredictorLG(nn.Module):
 
     def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
         if self.topk_selection:
-            x = self.in_conv_bn(x)
-            # x = self.in_conv(x)
-
+            x = self.in_conv(x)
             B, N, C = x.size()  # C
             local_x = x[:, :, :C // 2]
             global_x = torch.mean(x[:, :, C // 2:], dim=1, keepdim=True)
             x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
-            scores = self.out_conv_bn(x)
-            # scores = self.out_conv(x)
+            scores = self.out_conv(x)
 
-            # probs = F.softmax(logits, dim=-1)
-            # scores = F.softmax(probs[:, :, 1], dim=-1)
             if self.kl_div_loss:
                 # use mse loss/make scores resemble teacher CLS attn weights
                 keep_probs = F.softmax(scores, dim=-1)
@@ -564,8 +586,9 @@ class PredictorLG(nn.Module):
                 # use bce loss
                 keep_probs = torch.sigmoid(scores)
             if self.training:
-                topk_scores = torch.topk(keep_probs, self.k, dim=-1)[1]#self.topk(scores, current_sigma=current_sigma)self.topk(scores, current_sigma=current_sigma)#
-                return scores, topk_scores
+                # topk_scores = self.topk(scores, current_sigma=current_sigma)
+                # topk_scores = torch.topk(keep_probs, self.k, dim=-1)[1]
+                return scores, keep_probs
             else:
                 return scores, keep_probs
         else:
@@ -698,7 +721,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
                  topk_selection=False, early_exit=False, mean_heads=False, random_drop=False, small_predictor=False,
-                 predictor_vit=False, predictor_kl_div_loss=False):
+                 predictor_vit=False, predictor_kl_div_loss=False, predictor_bn=False):
         """
         Args:
             img_size (int, tuple): input image size
@@ -762,7 +785,7 @@ class VisionTransformerDiffPruning(nn.Module):
             predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
                                           k=int(token_ratio[i]*(img_size/patch_size)**2),
                                           only_cls_features=early_exit, small_predictor=small_predictor,
-                                          kl_div_loss=predictor_kl_div_loss)
+                                          kl_div_loss=predictor_kl_div_loss, use_bn=predictor_bn)
                               for i in range(len(pruning_loc))]
         else:
             predictor_list = [PredictorViT(num_classes=self.num_classes, embed_dim=self.embed_dim//4,
