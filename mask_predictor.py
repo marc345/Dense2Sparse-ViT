@@ -276,13 +276,13 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
     metrics["train_mask_acc"] = running_mask_acc / len(train_data_loader)
     metrics["train_cls_loss"] = running_cls_loss / len(train_data_loader)
 
-    # metrics["train TP"] = TP
-    # metrics["train TN"] = TN
-    # metrics["train FP"] = FP
-    # metrics["train FN"] = FN
+    metrics["train TP"] = TP
+    metrics["train TN"] = TN
+    metrics["train FP"] = FP
+    metrics["train FN"] = FN
     # metrics["train FPR"] = FP / (FP + TN)  # False Positive Rate
-    # metrics["train Recall"] = TP / (TP + FN)  # True Positive Rate
-    # metrics["train Precision"] = TP / (TP + FP)  # Positive Predictive Value
+    metrics["train Recall"] = TP / (TP + FN)  # True Positive Rate
+    metrics["train Precision"] = TP / (TP + FP)  # Positive Predictive Value
 
     # if not args.topk_selection:
     #     train_loss += loss_function(train_inputs, outputs, train_labels)
@@ -400,13 +400,13 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     metrics["val_mask_loss"] = running_mask_loss / len(val_data_loader)
     metrics["val_mask_acc"] = running_mask_acc / len(val_data_loader)
 
-    # metrics["val TP"] = TP
-    # metrics["val TN"] = TN
-    # metrics["val FP"] = FP
-    # metrics["val FN"] = FN
+    metrics["val TP"] = TP
+    metrics["val TN"] = TN
+    metrics["val FP"] = FP
+    metrics["val FN"] = FN
     # metrics["val FPR"] = FP / (FP + TN)  # False Positive Rate
-    # metrics["val Recall"] = TP / (TP + FN)  # True Positive Rate
-    # metrics["val Precision"] = TP / (TP + FP)  # Positive Predictive Value
+    metrics["val Recall"] = TP / (TP + FN)  # True Positive Rate
+    metrics["val Precision"] = TP / (TP + FP)  # Positive Predictive Value
 
     args.epoch_acc = metrics['val_acc']  # for title of visualization plot
     print(f'val loss: {metrics["val_loss"]:.4f}, acc: {metrics["val_acc"]:.4f}')
