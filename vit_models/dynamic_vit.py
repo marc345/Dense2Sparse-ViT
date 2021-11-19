@@ -1032,7 +1032,7 @@ class VisionTransformerDiffPruning(nn.Module):
 
         if self.training:
             if self.topk_selection:
-                return x, pred_logits, features
+                return x, features, pred_logits, keep_policy
             if self.distill:
                 # return the final logits, final spatial tokens,
                 return x, features, prev_decision.detach(), pred_logits, out_pred_prob
@@ -1185,9 +1185,11 @@ class VisionTransformerTeacher(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
+        cls_attn_weights = []
         # self.encoder_start.record()
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
+            x, cls_attns = blk(x, return_cls_attn=True)
+            cls_attn_weights.append(cls_attns.detach())
         # self.encoder_end.record()
 
         # self.head_start.record()
@@ -1198,7 +1200,7 @@ class VisionTransformerTeacher(nn.Module):
         cls = self.head(cls)
         # self.head_end.record()
 
-        return cls, tokens
+        return cls, tokens, torch.stack(cls_attn_weights, dim=1)
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from

@@ -174,16 +174,12 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
         # train_inputs = mask_test_imgs
         # train_labels = mask_test_labels
 
-        cls_attn_weights = train_attn_weights  # (B, L, H, N+1)
+        # logits from classifier head, final token representation, and CLS attention weights from teacher
+        logits_t, token_t, cls_attn_weights = teacher_model(train_inputs.clone())  # (B, L, H, N+1)
 
-        if args.cls_from_teacher:
-            # forward with CLS attention weights from unpruned teacher network
-            outputs = model(train_inputs.clone(), cls_attn_weights)
-        else:
-            # forward
-            outputs = model(train_inputs.clone())
-
-        pred_logits = outputs[-2]
+        # forward
+        # outputs = model(train_inputs.clone())
+        logits_s, token_s, pred_logits, kept_token_idx = model(train_inputs.clone())
 
         # O in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
         # O in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
@@ -235,13 +231,36 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
                                        patch_wise_labels.float().flatten())
         cls_loss = F.cross_entropy(logits_s, train_labels)
 
+        # alternate every 3 epochs between trainining only predictor w.r.t. predicting patch drop mask and keep
+        # backbone frozen and freezing predictor, and train backbone w.r.t. imagenet classification
+        # if ((args.step // 3) * 3) % 2 == 0:
+        if args.step < args.warmup_steps or args.step % 2 == 1:
+            train_loss = mask_loss #+ cls_loss
+        else:
+            cls_kl_loss = F.kl_div(
+                F.log_softmax(logits_s, dim=-1),
+                F.log_softmax(logits_t, dim=-1),
+                reduction='batchmean',
+                log_target=True
+            )
+
+            token_t = torch.gather(input=token_t, dim=1,
+                                   index=kept_token_idx.unsqueeze(-1).expand(-1, -1, token_t.shape[-1]))
+            token_kl_loss = F.kl_div(
+                F.log_softmax(token_s, dim=-1),
+                F.log_softmax(token_t, dim=-1),
+                reduction='batchmean',
+                log_target=True
+            )
+            train_loss = cls_loss + cls_kl_loss + token_kl_loss
+
         # zero the parameter gradients
         optimizer.zero_grad()
         train_loss.backward()
         optimizer.step()
-        preds = torch.argmax(outputs[0].detach(), dim=1)
+        preds = torch.argmax(logits_s.detach(), dim=1)
 
-        if i % (200 if args.is_sbatch else 10) == 0:
+        if i % (400 if args.is_sbatch else 10) == 0:
             print(f'training step_{i} '#patch bce loss: {mask_ce_loss.detach().item():.4f}, '
                   f'mask loss: {mask_loss.detach().item():.4f}, '
                   f'train loss: {train_loss:.4f}, '
@@ -318,16 +337,15 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
     metrics = {}
     accumulated_cls_attns = None
 
-    for val_idxs, val_attn_weights, val_inputs, val_labels in tqdm(val_data_loader):
+    # for val_idxs, val_attn_weights, val_inputs, val_labels in tqdm(val_data_loader):
+    for val_inputs, val_labels in tqdm(val_data_loader):
     # for i in tqdm(range(1)):
-    #     val_attn_weights = mask_test_attn_weights
     #     val_inputs = mask_test_imgs
     #     val_labels = mask_test_labels
-        val_attn_weights = val_attn_weights.to(args.device)
         val_inputs = val_inputs.to(args.device)
         val_labels = val_labels.to(args.device)
 
-        cls_attn_weights = val_attn_weights  # (B, L, H, N+1)
+        cls_attn_weights = teacher_model.forward_cls_attention(val_inputs.clone())  #  val_attn_weights  # (B, L, H, N+1)
 
         gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0], mean_heads=args.mean_heads)
 
@@ -832,10 +850,9 @@ if __name__ == '__main__':
         best_acc, best_mask_acc = 0.0, 0.0
 
         for epoch in range(args.epochs):
+            args.step = epoch
             print('Epoch {}/{}'.format(epoch + 1, args.epochs))
             print('-' * 50)
-
-            epoch_metrics = {}
 
             warmup_step = args.warmup_steps #if not args.attn_selection else 0  # warmup step for predictor modules
             utils.adjust_learning_rate(optim.param_groups, args, epoch,
@@ -844,10 +861,8 @@ if __name__ == '__main__':
                 # linearly decay sigma of top-k module during training
                 student.current_sigma = args.current_sigma
 
-
             # evaluate_timing(args, student, teacher, data_loaders['val'])
             # continue
-
             train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'],
                                             mask_loss_fn, dynamic_vit_loss, optim)
             val_metrics, avg_cls_attns = evaluate(args, student, teacher, data_loaders['val'], mask_loss_fn)
@@ -862,7 +877,6 @@ if __name__ == '__main__':
             if args.is_sbatch and args.wandb:
                 # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
                 wandb.log(epoch_metrics)
-
 
         time_elapsed = time.time() - since
         if args.is_sbatch and args.wandb:
