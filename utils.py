@@ -17,6 +17,10 @@ def get_model(args, pretrained=True):
                          and callable(models.__dict__[name]))
     if 'deit_small_dist_masked' in args['model_name']:
         model = vit_models.deit_small_patch16_224_masked(pretrained=pretrained)
+    elif 'default_dynamic_vit_student' in args['model_name']:
+        model = vit_models.default_dynamic_vit_small_patch16_224_student()
+    elif 'default_dynamic_vit_teacher' in args['model_name']:
+        model = vit_models.default_dynamic_vit_small_patch16_224_teacher()
     elif 'dynamic_vit_student' in args['model_name']:
         model = vit_models.dynamic_vit_small_patch16_224_student()
     elif 'dynamic_vit_teacher' in args['model_name']:
