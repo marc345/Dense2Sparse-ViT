@@ -743,6 +743,9 @@ if __name__ == '__main__':
                                                         predictor_bn=args.predictor_bn)
         parameter_group = utils.get_param_groups(student, args)
 
+        if args.is_sbatch and args.wandb:
+            wandb.watch(student, log="gradients")  # "gradients", "parameters", "all"
+
         # freeze whole model except predictor network
         if args.freeze_backbone:
             print(f'Freezing whole student, except predictor network')
