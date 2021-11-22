@@ -79,22 +79,20 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
         args.current_sigma = max(0, (1-step/args.epochs)*args.initial_sigma)
     cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
     cos_lr = (args.min_lr + cos_lr * (args.lr - args.min_lr))  # args.lr #
-    if args.early_exit:
-        early_exit_head_lr = 0 #cos_lr * 10
-    if warmup_predictor and step < 1:
-        cos_lr = args.lr * 0.01
+    
+    # if args.early_exit:
+    #     early_exit_head_lr = 0 #cos_lr * 10
+    # if warmup_predictor and step < 1:
+    #     cos_lr = args.lr * 0.01
     # if step < warming_up_step or args.freeze_backbone:
     #     backbone_lr = 0
-    # else:
-    #     backbone_lr = min(args.lr * 0.01, cos_lr)
-    # if step >= warming_up_step:
-    #     predictor_lr = 0
-    # else:
     #     predictor_lr = cos_lr
+    # else:
+    #     predictor_lr = 0
+    #     backbone_lr = min(args.lr * 0.01, cos_lr)
 
     # alternate every 3 epochs between freezing backbone and training predictor and vice versa
     # start with training the predictor
-    # if ((step//3)*3) % 2 == 0:
     if step < args.warmup_steps or step % 2 == 1:
         predictor_lr = cos_lr
         backbone_lr = 0
