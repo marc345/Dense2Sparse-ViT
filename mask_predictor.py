@@ -247,14 +247,27 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
                 log_target=True
             )
 
-            token_t = torch.gather(input=token_t, dim=1,
-                                   index=kept_token_idx.unsqueeze(-1).expand(-1, -1, token_t.shape[-1]))
-            token_kl_loss = F.kl_div(
-                F.log_softmax(token_s, dim=-1),
-                F.log_softmax(token_t, dim=-1),
-                reduction='batchmean',
-                log_target=True
-            )
+            # token_t = torch.gather(input=token_t, dim=1,
+            #                        index=kept_token_idx.unsqueeze(-1).expand(-1, -1, token_t.shape[-1]))
+
+            B, N, C = token_s.size()
+            assert kept_token_idx.numel() == B * N
+            kept_token_idx = kept_token_idx.reshape(B * N).long()
+            token_s = token_s.reshape(B * N, C)
+            token_t = token_t.reshape(B * N, C)
+
+            if kept_token_idx.sum() < 0.1:
+                token_kl_loss = token_s.new(1, ).fill_(0.0)
+            else:
+                token_s = token_s[kept_token_idx]
+                token_t = token_t[kept_token_idx]
+                token_kl_loss = F.kl_div(
+                    F.log_softmax(token_s, dim=-1),
+                    F.log_softmax(token_t, dim=-1),
+                    reduction='batchmean',
+                    log_target=True
+                )
+
             train_loss = cls_loss + cls_kl_loss + token_kl_loss
 
         # zero the parameter gradients
