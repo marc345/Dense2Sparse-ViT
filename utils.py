@@ -219,5 +219,8 @@ def parse_args():
                              'function for predicted mask')
     parser.add_argument('--predictor-bn', action='store_true', default=False,
                         help='Use batch normalization instead of layer normalization in the predictor MLP')
+    parser.add_argument('--patch-score-threshold',
+                        help='Value to threshold cumulative sum of sorted predicted patch scores',
+                        default=None, type=float)
 
     return parser.parse_args()

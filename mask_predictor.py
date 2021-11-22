@@ -162,6 +162,9 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     TP, FP, TN, FN = 0, 0, 0, 0
 
+    running_min_keep_ratio, running_avg_keep_ratio, running_max_keep_ratio = 1.0, 0.0, 0.0
+    running_keep_ratios = []
+
     metrics = {}
 
     model.train()
@@ -277,6 +280,12 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
         running_mask_acc += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
         running_cls_loss += cls_loss.detach().item()
 
+        if args.patch_score_threshold is not None:
+            running_keep_ratios += model.keep_ratios.tolist()
+            running_min_keep_ratio = min(model.min_keep_ratio, running_min_keep_ratio)
+            running_avg_keep_ratio += model.avg_keep_ratio
+            running_max_keep_ratio = max(model.max_keep_ratio, running_max_keep_ratio)
+
         TP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 1).item()  # keep patch predicted for keep patch class
         TN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 0).item()  # drop patch predicted for drop patch class
         FP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 0).item()  # keep patch predicted for drop patch class
@@ -294,6 +303,16 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
     metrics["train_mask_loss"] = running_mask_loss / len(train_data_loader)
     metrics["train_mask_acc"] = running_mask_acc / len(train_data_loader)
     metrics["train_cls_loss"] = running_cls_loss / len(train_data_loader)
+
+
+    # keep_ratios_table = wandb.Table(data=running_keep_ratios, columns=["keep_ratios"])
+    # metrics["train_keep_ratios_hist"] = wandb.plot.histogram(keep_ratios_table, "keep_ratios", title="Training Keep Ratios"
+    #                                                                                                  "Histogram")
+    if args.patch_score_threshold is not None:
+        attention_segmentation.dynamic_keep_ratio_hist(args, running_keep_ratios, "training")
+        metrics["train_min_keep_ratio"] = running_min_keep_ratio
+        metrics["train_avg_keep_ratio"] = (running_avg_keep_ratio / len(train_data_loader))
+        metrics["train_max_keep_ratio"] = running_max_keep_ratio
 
     metrics["train TP"] = TP
     metrics["train TN"] = TN
@@ -328,6 +347,8 @@ def train_one_epoch(args, model, teacher_model, train_data_loader, mask_criterio
 def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
 
     running_loss, running_acc, running_mask_acc, running_mask_loss = 0.0, 0.0, 0.0, 0.0
+    running_min_keep_ratio, running_avg_keep_ratio, running_max_keep_ratio = 1.0, 0.0, 0.0
+    running_keep_ratios = []
 
     TP, FP, TN, FN, = 0, 0, 0, 0
 
@@ -408,10 +429,22 @@ def evaluate(args, model, teacher_model, val_data_loader, mask_criterion):
         running_mask_loss += mask_loss.detach().item()
         running_mask_acc += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
 
+        if args.patch_score_threshold is not None:
+            running_keep_ratios += model.keep_ratios.tolist()
+            running_min_keep_ratio = min(model.min_keep_ratio, running_min_keep_ratio)
+            running_avg_keep_ratio += model.avg_keep_ratio
+            running_max_keep_ratio = max(model.max_keep_ratio, running_max_keep_ratio)
+
         TP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 1).item()  # keep patch predicted for keep patch class
         TN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 0).item()  # drop patch predicted for drop patch class
         FP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 0).item()  # keep patch predicted for drop patch class
         FN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 1).item()  # drop patch predicted for keep patch class
+
+    if args.patch_score_threshold is not None:
+        attention_segmentation.dynamic_keep_ratio_hist(args, running_keep_ratios, "validation")
+        metrics["val_min_keep_ratio"] = running_min_keep_ratio
+        metrics["val_avg_keep_ratio"] = (running_avg_keep_ratio / len(val_data_loader))
+        metrics["val_max_keep_ratio"] = running_max_keep_ratio
 
     metrics['val_loss'] = running_loss / len(val_data_loader)  # batch_repeat_factor
     metrics['val_acc'] = float(running_acc) / (len(val_data_loader))  # batch_repeat_factor
@@ -740,7 +773,8 @@ if __name__ == '__main__':
                                                         small_predictor=args.small_predictor,
                                                         predictor_vit=args.predictor_vit,
                                                         predictor_kl_div_loss=args.use_kl_div_loss or args.use_mse_loss,
-                                                        predictor_bn=args.predictor_bn)
+                                                        predictor_bn=args.predictor_bn,
+                                                        patch_score_threshold=args.patch_score_threshold)
         parameter_group = utils.get_param_groups(student, args)
 
         if args.is_sbatch and args.wandb:
@@ -809,10 +843,30 @@ if __name__ == '__main__':
         samplers = {x: SubsetRandomSampler(data_indices[x]) for x in ['train', 'val']}
 
         # prepare data loaders
-        data_loaders = {x: DataLoader(data[x], batch_size=args.batch_size, sampler=samplers[x],
-                                      pin_memory=True, num_workers=2 if args.is_sbatch else 0,
-                                      drop_last=(x == 'val'))
-                        for x in ['train', 'val']}
+        if args.patch_score_threshold is not None:
+            # if we use dynamic keep ratios we can only use a batch size of 1 for validation, for training we apply
+            # attention masking as proposed in dynamic ViT
+            data_loaders = {x: DataLoader(data[x], batch_size=args.batch_size if x == "train" else 1, sampler=samplers[x],
+                                          pin_memory=True, num_workers=2 if args.is_sbatch else 0)
+                            for x in ['train', 'val']}
+        else:
+            data_loaders = {
+                x: DataLoader(data[x], batch_size=args.batch_size, sampler=samplers[x],
+                              pin_memory=True, num_workers=2 if args.is_sbatch else 0)
+                for x in ['train', 'val']}
+
+        # for data in tqdm(DataLoader(Subset(data['val'], data_indices['val']), batch_size=1)):
+        #     index, attn_weights, input, _ = data[0].to(args.device), data[1].to(args.device),
+        #       data[2].to(args.device), data[3].to(args.device)
+        #     # print(f'Processing val index: {index}')
+        #     cls_attn_weights = teacher.forward_cls_attention(input.clone())
+        #     try:
+        #         assert torch.all(cls_attn_weights == attn_weights)
+        #     except:
+        #         print(index.item())
+        #     # torch.save(cls_attn_weights[0].clone().cpu,
+        #     #            f'/scratch_net/biwidl215/segerm/TeacherAttentionWeights/'
+        #                  f'{"sbatch/" if args.is_sbatch else ""}DeiT-S16/CLS/{index.item()}.pt')
 
         #print(indices[split - 64:split])
         mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814,
