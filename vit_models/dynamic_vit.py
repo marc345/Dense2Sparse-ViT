@@ -193,11 +193,16 @@ class Attention(nn.Module):
         # self.attn_end = torch.cuda.Event(enable_timing=True)
 
     def softmax_with_policy(self, attn, policy, eps=1e-6):
-        B, N, _ = policy.size()
+        B, N, _ = policy.size()  # B, N, 1
         B, H, N, N = attn.size()
         attn_policy = policy.reshape(B, 1, 1, N)  # * policy.reshape(B, 1, N, 1)
         eye = torch.eye(N, dtype=attn_policy.dtype, device=attn_policy.device).view(1, 1, N, N)
+        # each row of the attn_policy matrix is equal to the transposed binary mask vector
+        # and an additional 1 in case of the token corresponding to the current row is dropped (0 in binary mask)
         attn_policy = attn_policy + (1.0 - attn_policy) * eye
+        # as the softmax function is invariant to additive biases we subtract the maximum attention weight for each row
+        # in the attention matrix from that row, before applying the row-wise softmax, this avoids over/under flow and
+        # thus increase numerical stability
         max_att = torch.max(attn, dim=-1, keepdim=True)[0]
         attn = attn - max_att
         # attn = attn.exp_() * attn_policy
