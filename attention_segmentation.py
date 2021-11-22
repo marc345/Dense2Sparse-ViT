@@ -5,6 +5,21 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from torch.nn.functional import interpolate
 
+def dynamic_keep_ratio_hist(args, ratios, phase="train"):
+    save_path = args.save_path + args.job_name
+    pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
+    # ratios = np.array(ratios)
+    # q25, q75 = np.percentile(ratios, [0.25, 0.75])
+    # bin_width = 2 * (q75 - q25) * len(ratios) ** (-1 / 3)
+    # bins = round((ratios.max() - ratios.min()) / bin_width)
+    # print("Freedman–Diaconis number of bins:", bins)
+    plt.hist(ratios, density=False, bins=[i/20 for i in range(21)])  # density=False would make counts
+    plt.ylabel('Count')
+    plt.xlabel('Keep Ratios')
+    plt.title(f"Histogram of variable {phase} keep ratios, Epoch {args.step}\n"
+              f"Taking only the highest {int(args.patch_score_threshold*100)}% of predicted scores\n",
+              fontsize=14, y=0.93)
+    plt.savefig(f'{save_path}/{phase}_hist_{args.step+1}.jpg')
 
 def get_attention_masks(args, images, model):
     """
