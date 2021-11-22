@@ -591,7 +591,7 @@ class PredictorLG(nn.Module):
                 # use bce loss
                 keep_probs = torch.sigmoid(scores)
             if self.training:
-                # topk_scores = self.topk(scores, current_sigma=current_sigma)
+                # topk_scores = self.topk(keep_probs, current_sigma=current_sigma)
                 # topk_scores = torch.topk(keep_probs, self.k, dim=-1)[1]
                 return scores, keep_probs
             else:
@@ -1037,7 +1037,7 @@ class VisionTransformerDiffPruning(nn.Module):
                         # randomly drop patches
                         # random shuffle of keep policy for each image in the batch
                         idxs = []
-                        for b in range(B):
+                        for _ in range(B):
                             idxs.append(torch.randperm(N))
                         idxs = torch.stack(idxs, dim=0).to(spatial_x.device)
                         # keep_policy = torch.gather(index=idxs, input=keep_policy, dim=1)
