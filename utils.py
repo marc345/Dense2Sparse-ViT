@@ -126,7 +126,7 @@ def adjust_learning_rate(param_groups, args, step, model, warming_up_step=2, war
         predictor_lr = cos_lr
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
-    lr_info = f'### Using lr  {backbone_lr:.7f} for BACKBONE, cosine lr = {predictor_lr:.7f} for PREDICTOR'
+    lr_info = f'### Using lr {backbone_lr:.7f} for BACKBONE, cosine lr = {predictor_lr:.7f} for PREDICTOR'
     if args.topk_selection:
         lr_info += f', current sigma = {args.current_sigma:.8f} for TOP-K'
     if args.early_exit:
