@@ -20,16 +20,25 @@ import time
 import numpy as np
 from tqdm import tqdm
 from timm.scheduler import CosineLRScheduler
-from timm.utils import NativeScaler
+from timm.utils import NativeScaler, ModelEma
+from timm.data import create_transform, Mixup
 import losses
 import random
 import json
 import wandb
 
+from vit_models import dynamic_vit_tiny_patch16_224_student, dynamic_vit_small_patch16_224_student, \
+    dynamic_vit_base_patch16_224_student
+from build_data_sets import get_data_sets
+from fvcore.nn import FlopCountAnalysis
+
+
 import utils
 import attention_segmentation
 from ddp_training import train_model_ddp
-from vit_models import dynamic_vit_small_patch16_224_student
+from train import *
+from evaluate import *
+from pathlib import Path
 
 seed = 42
 torch.manual_seed(seed)
@@ -258,11 +267,6 @@ if __name__ == '__main__':
     args.save_path += 'mask_predictor/'
     args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    #data_dir = "/scratch_net/biwidl215/segerm/ImageNetVal2012/"
-    #data_dir = "/srv/beegfs-benderdata/scratch/density_estimation/data/segerm/ImageNetVal2012"
-    #data_dir = "/home/marc/Downloads/ImageNetVal2012/"
-    #data_dir = '/home/marc/Downloads/ImageNetVal2012_split'
-
     data_dir = args.imgnet_val_dir
 
     print(f'Input data path: {data_dir}')
@@ -286,9 +290,7 @@ if __name__ == '__main__':
                 args.patch_selection_method += '_random_drop/'
             # else:
             #     args.patch_selection_method += f"{'_mean_heads' if args.mean_heads else '_max_heads'}"
-            args.patch_selection_method += f'_teacher_cls_loss'
-        else:
-            args.patch_selection_method += f'_teacher_cls_loss'
+            # args.patch_selection_method += f'_teacher_cls_loss'
 
         # loss function used for predicted mask vs. ground truth mask from averaged teacher CLS attention
         args.patch_selection_method += '_' + args.mask_loss_type
@@ -308,23 +310,16 @@ if __name__ == '__main__':
                         # f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
 
         # inital sigma if top-k selection is used, sigma is decayed linearly over training
-        if args.topk_selection:
-            args.job_name += f'_S{args.initial_sigma}'
+        # if args.topk_selection:
+        #     args.job_name += f'_S{args.initial_sigma}'
 
         # either small MLP, large MLP or 1-layer ViT are used as predictor networks
         if args.small_predictor:
             args.job_name += '_sMP'
         else:
-            args.job_name += '_VP'
+            args.job_name += '_lMP'
 
         args.job_name += f'_{str(args.job_id)}'
-
-            # for top-k the batch size is adapted based on the prunin location
-            # TODO:  Why does top-k increase the memory allocation so much compared to gumbel softmax?
-            # if args.pruning_locs[0] < 7:
-            #     args.batch_size = 32
-            # else:
-            #     args.batch_size = 16
 
         wandb_job_name = f'{os.environ["WANDB_NAME"] + " " if os.environ.get("WANDB_NAME") is not None else ""}' \
                          f'{args.job_name}'
@@ -419,8 +414,8 @@ if __name__ == '__main__':
 
         parameter_group = utils.get_param_groups(student, args)
 
-        if args.is_sbatch and args.wandb:
-            wandb.watch(student, log="gradients")  # "gradients", "parameters", "all"
+        # if args.is_sbatch and args.wandb:
+        #     wandb.watch(student, log="gradients")  # "gradients", "parameters", "all"
 
         # freeze whole model except predictor network
         if args.freeze_backbone:
@@ -431,40 +426,12 @@ if __name__ == '__main__':
                 else:
                     p.requires_grad = False
 
-        teacher = utils.get_model({'model_name': 'dynamic_vit_teacher', 'patch_size': 16}, pretrained=True)
         teacher.eval()
         for param in teacher.parameters():
             param.requires_grad = False
 
-        #dino_model = utils.get_model({'model_name': 'dino_small_dist', 'patch_size': 16}, pretrained=True)
-        #dino_model.eval()
-        #for param in dino_model.parameters():
-        #    param.requires_grad = False
-
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
         optim = torch.optim.AdamW(parameter_group, **opt_args)
-
-        dynamic_vit_loss = losses.DistillDiffPruningLoss(args, teacher_model=teacher, clf_weight=args.cls_weight,
-                                                  ratio_weight=args.ratio_weight, distill_weight=args.dist_weight,
-                                                  pruning_loc=args.pruning_locs, keep_ratio=args.keep_ratios,
-                                                  base_criterion=torch.nn.CrossEntropyLoss(),
-                                                  softmax_temp=args.softmax_temp, early_exit=args.early_exit)
-
-        # for pixel-wise crossentropy loss
-        # as the classes (1: kept token, 0: dropped token) we use a weight for the positive class to counteract
-        # this class imbalance
-        dropped_token_weights = torch.ones(size=(args.batch_size,)) * args.keep_ratios[0]/(1-args.keep_ratios[0])
-        kept_token_weights = torch.ones(size=(args.batch_size,)) * (1-args.keep_ratios[0])/args.keep_ratios[0]
-        weights = torch.cat((dropped_token_weights, kept_token_weights)).to(args.device)
-        mask_loss_fn = torch.nn.BCEWithLogitsLoss(weight=weights[1], reduction='mean')
-        # mask_loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
-
-        ImageFolderWithIndicesAndAttnWeights = dataset_with_indices_and_attn_weights(datasets.ImageFolder)
-        data = {
-            'train': datasets.ImageFolder(data_dir, transform=data_transforms['train']),
-            # 'val': ImageFolderWithIndicesAndAttnWeights(data_dir, transform=data_transforms['val'])
-            'val': datasets.ImageFolder(data_dir, transform=data_transforms['val'])
-        }
 
 
         # obtain training indices that will be used for validation
@@ -472,14 +439,7 @@ if __name__ == '__main__':
         indices = list(range(num_train))
         np.random.shuffle(indices)
         split = int(np.floor(0.2 * num_train))
-
-        # overfit on a single batch for a debug (non sbatch submitted) job
-        if not args.is_sbatch:
-            # data_indices = {'train': indices[:args.batch_size], 'val': indices[:args.batch_size]}
-            data_indices = {'train': indices[split:], 'val': indices[:split]}
-        else:
-            data_indices = {'train': indices[split:], 'val': indices[:split]}
-
+        data_indices = {'train': indices[split:], 'val': indices[:split]}
 
         # define samplers for obtaining training and validation batches
         samplers = {x: SubsetRandomSampler(data_indices[x]) for x in ['train', 'val']}
@@ -488,8 +448,8 @@ if __name__ == '__main__':
         if args.patch_score_threshold is not None:
             # if we use dynamic keep ratios we can only use a batch size of 1 for validation, for training we apply
             # attention masking as proposed in dynamic ViT
-            data_loaders = {x: DataLoader(data[x], batch_size=args.batch_size if x == "train" else 1, sampler=samplers[x],
-                                          pin_memory=True, num_workers=2 if args.is_sbatch else 0)
+            data_loaders = {x: DataLoader(data[x], batch_size=args.batch_size if x == "train" else 1,
+                                          sampler=samplers[x], pin_memory=True, num_workers=2 if args.is_sbatch else 0)
                             for x in ['train', 'val']}
         else:
             data_loaders = {
@@ -497,45 +457,20 @@ if __name__ == '__main__':
                               pin_memory=True, num_workers=2 if args.is_sbatch else 0)
                 for x in ['train', 'val']}
 
-        # for data in tqdm(DataLoader(Subset(data['val'], data_indices['val']), batch_size=1)):
-        #     index, attn_weights, input, _ = data[0].to(args.device), data[1].to(args.device),
-        #       data[2].to(args.device), data[3].to(args.device)
-        #     # print(f'Processing val index: {index}')
-        #     cls_attn_weights = teacher.forward_cls_attention(input.clone())
-        #     try:
-        #         assert torch.all(cls_attn_weights == attn_weights)
-        #     except:
-        #         print(index.item())
-        #     # torch.save(cls_attn_weights[0].clone().cpu,
-        #     #            f'/scratch_net/biwidl215/segerm/TeacherAttentionWeights/'
-        #                  f'{"sbatch/" if args.is_sbatch else ""}DeiT-S16/CLS/{index.item()}.pt')
+        mixup_fn = None
 
         #print(indices[split - 64:split])
-        mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814,
-                             7516, 18679, 17954, 961, 30928, 1791, 48390, 4393,
-                             22823, 40143, 24015, 25804, 5749, 35437, 25374, 11547,
-                             32996, 39908, 18314, 49925, 4262, 46756, 1800, 18519,
-                             35824, 40151, 22328, 49239, 33673, 32273, 34145, 9233,
-                             44244, 29239, 17202, 42408, 46840, 40110, 48482, 38854,
-                             6942, 35047, 29507, 33984, 47733, 5325, 29598, 43515,
-                             15832, 37692, 26859, 28567, 25079, 18707, 15200, 5857]
+        mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814, 7516, 18679, 17954, 961, 30928, 1791,
+                             48390, 4393, 22823, 40143, 24015, 25804, 5749, 35437, 25374, 11547, 32996, 39908, 18314,
+                             49925, 4262, 46756, 1800, 18519, 35824, 40151, 22328, 49239, 33673, 32273, 34145, 9233,
+                             44244, 29239, 17202, 42408, 46840, 40110, 48482, 38854, 942, 35047, 29507, 33984, 47733,
+                             5325, 29598, 43515, 15832, 37692, 26859, 28567, 25079, 18707, 15200, 5857]
 
         mask_test_dataset = Subset(data['val'], mask_test_indices)
         mask_test_data_loader = DataLoader(mask_test_dataset, batch_size=args.batch_size)
         mask_test_data = next(iter(mask_test_data_loader))
-        # mask_test_idx, mask_test_attn_weights, mask_test_imgs, mask_test_labels \
-        #     = mask_test_data[0][:16], mask_test_data[1][:16], mask_test_data[2][:16], mask_test_data[3][:16]
-        mask_test_imgs, mask_test_labels = mask_test_data[0][:16], mask_test_data[1][:16]
-        # mask_test_attn_weights = mask_test_attn_weights.to(args.device)
-        mask_test_imgs = mask_test_imgs.to(args.device)
-        mask_test_labels = mask_test_labels.to(args.device)
-
-        if args.use_dp:
-            student = MyDataParallel(student)
-            teacher = MyDataParallel(teacher)
-
-        student = student.to(args.device)
-        teacher = teacher.to(args.device)
+        mask_test_imgs, mask_test_labels = mask_test_data[0][:16].to(args.device), \
+                                           mask_test_data[1][:16].to(args.device)
 
         predictor_network_params = 0
         for n, p in student.named_parameters():
@@ -554,11 +489,11 @@ if __name__ == '__main__':
             print('-' * 50)
 
             warmup_step = args.warmup_steps #if not args.attn_selection else 0  # warmup step for predictor modules
-            utils.adjust_learning_rate(optim.param_groups, args, epoch,
+            utils.adjust_learning_rate(optim.param_groups, args, epoch, student,
                                        warmup_predictor=False, warming_up_step=warmup_step, base_multi=0.1)
-            if args.topk_selection:
-                # linearly decay sigma of top-k module during training
-                student.current_sigma = args.current_sigma
+            # if args.topk_selection:
+            #     # linearly decay sigma of top-k module during training
+            #     student.current_sigma = args.current_sigma
 
             # evaluate_timing(args, student, teacher, data_loaders['val'])
             # continue
