@@ -1,6 +1,6 @@
 import argparse
 import torchvision.models as models
-
+import torch
 from timm.models import create_model
 import math
 
@@ -70,7 +70,7 @@ def get_param_groups(model, args):
     predictor = []
     early_exit = []
     for name, param in model.named_parameters():
-        if 'predictor' in name:
+        if 'predictor' in name or 'dist' in name:
             predictor.append(param)
         elif 'early_exit' in name:
             early_exit.append(param)
@@ -90,7 +90,7 @@ def get_param_groups(model, args):
         ]
 
 
-def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_predictor=False, base_multi=0.1):
+def adjust_learning_rate(param_groups, args, step, model, warming_up_step=2, warmup_predictor=False, base_multi=0.1):
     if args.topk_selection:
         args.current_sigma = max(0, (1-step/args.epochs)*args.initial_sigma)
     cos_lr = (math.cos(step / args.epochs * math.pi) + 1) * 0.5
@@ -109,11 +109,21 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
 
     # alternate every 3 epochs between freezing backbone and training predictor and vice versa
     # start with training the predictor
-    if step < args.warmup_steps or step % 2 == 1:
+    if step < args.warmup_steps:  # or step % 2 == 1:
+        for n, p in model.named_parameters():
+            if 'dist' in n or 'predictor' in n:
+                p.requires_grad_(True)
+            else:
+                p.requires_grad_(False)
         predictor_lr = cos_lr
         backbone_lr = 0
     else:
-        predictor_lr = 0
+        for n, p in model.named_parameters():
+            if 'dist' in n or 'predictor' in n:
+                p.requires_grad_(True)
+            else:
+                p.requires_grad_(True)
+        predictor_lr = cos_lr
         backbone_lr = min(args.lr * 0.01, cos_lr)
 
     lr_info = f'### Using lr  {backbone_lr:.7f} for BACKBONE, cosine lr = {predictor_lr:.7f} for PREDICTOR'
