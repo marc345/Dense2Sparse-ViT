@@ -127,10 +127,16 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
     for param_group in param_groups:
         if param_group['name'] == 'predictor':
             param_group['lr'] = predictor_lr
+            for p in param_group['params']:
+                p.requires_grad_(predictor_lr != 0)
         elif args.early_exit and param_group['name'] == 'early_exit':
             param_group['lr'] = early_exit_head_lr
         else:
             param_group['lr'] = backbone_lr  # init_lr * 0.01 # cos_lr * base_multi
+            for p in param_group['params']:
+                p.requires_grad_(backbone_lr != 0)
+
+
 def get_current_keep_ratio(epoch):
     """ Returns keep ratio for curriculum learning based on current epoch
         :param epoch: the current epoch of the training period
