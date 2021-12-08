@@ -536,10 +536,14 @@ class PredictorLG(nn.Module):
     def forward(self, x, policy=None, current_sigma=0.0005, cls_attn=None):
         if self.topk_selection:
             x = self.in_conv(x)
-            B, N, C = x.size()  # C
+            B, N, C = x.size()
             local_x = x[:, :, :C // 2]
+            # local_x = x[:, 1:]
             global_x = torch.mean(x[:, :, C // 2:], dim=1, keepdim=True)
+            # global_x = cls_attn.unsqueeze(-1)
             x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
+            # x = torch.cat([x, global_x.expand(-1, N, C)], dim=-1)
+
             scores = self.out_conv(x)
 
             if self.loss_type in ["kl_div", "mse"]:
@@ -555,100 +559,84 @@ class PredictorLG(nn.Module):
             else:
                 return scores, keep_probs
 
+class PredictorAggregator(nn.Module):
+    """ Image to Patch Embedding
     """
-    def __init__(self, num_classes=1000, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None, k=None,
-                 parent_embed_dim=384):
-        """
-        Args:
-            num_classes (int): number of classes for classification head
-            embed_dim (int): embedding dimension
-            depth (int): depth of transformer
-            num_heads (int): number of attention heads
-            mlp_ratio (int): ratio of mlp hidden dim to embedding dim
-            qkv_bias (bool): enable bias for qkv if True
-            qk_scale (float): override default qk scale of head_dim ** -0.5 if set
-            drop_rate (float): dropout rate
-            attn_drop_rate (float): attention dropout rate
-            drop_path_rate (float): stochastic depth rate
-            norm_layer: (nn.Module): normalization layer
-        """
+    def __init__(self, sequence_length: int, embed_dim=384):
         super().__init__()
 
-        self.num_classes = num_classes
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
+        self.act = nn.ReLU()
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.in_conv = nn.Sequential(
+            BatchNormLayer(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            self.act
+        )
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        self.blocks = nn.ModuleList([
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
-            for i in range(depth)])
+        # small output block with batch norm
+        self.out_conv = nn.Sequential(
+            BatchNormLayer(sequence_length),
+            nn.Linear(sequence_length, sequence_length // 2),
+            self.act,
+            BatchNormLayer(sequence_length // 2),
+            nn.Linear(sequence_length // 2, sequence_length // 4),
+            self.act,
+            BatchNormLayer(sequence_length // 4),
+            nn.Linear(sequence_length // 4, 1),
+        )
 
-        # self.norm = norm_layer(embed_dim)
-        # self.pre_logits = nn.Identity()
-        # # Classifier head
-        # self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-        # Perturbed Top-K module
-        self.k = k
-        self.topk = PerturbedTopK(k)
 
-        self.transform_embed = nn.Linear(parent_embed_dim, embed_dim)
+    def forward(self, x):
+          B, N, C = x.shape
+          x = self.in_conv(x)
+          local_x = x[:, :, :C // 2]
+          global_x = torch.mean(x[:, :, C // 2:], dim=1, keepdim=True)
+          x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
+          x = torch.transpose(x, 1, 2)
+          x = self.out_conv(x)
+          return torch.transpose(x, 1, 2)
 
-        trunc_normal_(self.cls_token, std=.02)
-        self.apply(self._init_weights)
+class PredictorReconstructor(nn.Module):
+    """ Image to Patch Embedding
+    """
+    def __init__(self, embed_dim=384):
+        super().__init__()
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'pos_embed', 'cls_token'}
+        self.in_conv = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+        self.out_conv = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim * 2),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
 
-    def get_classifier(self):
-        return self.head
 
-    def reset_classifier(self, num_classes, global_pool=''):
-        self.num_classes = num_classes
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+    def forward(self, x):
+        y = x + self.in_conv(x)
+        B, N, C = x.size()  # C
+        # local_x = x[:, :, :C // 2]
+        # local_x = x[:, 1:]
+        # global_x = torch.mean(x[:, :, C // 2:], dim=1, keepdim=True)
+        # global_x = x[:, :1]
+        # x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
+        # x = torch.cat([local_x, global_x.expand(-1, N-1, C)], dim=-1)
 
-    def forward(self, x, policy=None, current_sigma=5e-4):
-        B = x.shape[0]
-
-        x = self.transform_embed(x)
-
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
-        x[:, 0:1] += cls_tokens
-
-        cls_attn_weights = []
-
-        for i, blk in enumerate(self.blocks):
-            x, cls_attns = blk(x, return_cls_attn=True)
-            cls_attn_weights.append(cls_attns)
-            x = blk(x)
-
-        # feature = self.norm(x)
-        # cls = feature[:, 0]
-        # tokens = feature[:, 1:]
-        # cls = self.pre_logits(cls)
-        # cls = self.head(cls)
-
-        cls_attn_weights = torch.stack(cls_attn_weights, dim=1)  # (B, L, H, N+1)
-        avg_cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
-        max_cls_attn_weights, _ = torch.max(avg_cls_attn_weights, dim=1)  # (B, N+1)
-
-        return cls_attn_weights, max_cls_attn_weights[:, 1:]
+        return self.out_conv(y)
 
 
 class VisionTransformerDiffPruning(nn.Module):
@@ -662,6 +650,7 @@ class VisionTransformerDiffPruning(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
                  topk_selection=False, early_exit=False, mean_heads=False, random_drop=False, small_predictor=False,
+                 predictor_loss_type=False, predictor_bn=False, patch_score_threshold=None):
         """
         Args:
             img_size (int, tuple): input image size
@@ -700,6 +689,9 @@ class VisionTransformerDiffPruning(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
+        # self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # self.pos_embed_dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             Block(
@@ -721,19 +713,25 @@ class VisionTransformerDiffPruning(nn.Module):
         # Classifier head
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-        if not predictor_vit:
-            predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
-                                          k=int(token_ratio[i]*(img_size/patch_size)**2),
-                                          only_cls_features=early_exit, small_predictor=small_predictor,
-                                          kl_div_loss=predictor_kl_div_loss, use_bn=predictor_bn)
-                              for i in range(len(pruning_loc))]
-        else:
-            predictor_list = [PredictorViT(num_classes=self.num_classes, embed_dim=self.embed_dim//4,
-                                           depth=12-pruning_loc[0], num_heads=6, mlp_ratio=1,
-                                           k=int(token_ratio[i]*(img_size/patch_size)**2), parent_embed_dim=embed_dim)
-                              for i in range(len(pruning_loc))]
+        predictor_list = [PredictorLG(embed_dim, topk_selection=topk_selection,
+                                      k=int(token_ratio[i]*(img_size/patch_size)**2),
+                                      small_predictor=small_predictor,
+                                      loss_type=predictor_loss_type, use_bn=predictor_bn)
+                          for i in range(len(pruning_loc))]
 
         self.score_predictor = nn.ModuleList(predictor_list)
+
+        # aggregator_list = []
+        # for i in range(len(pruning_loc)):
+        #     sequence_length = int((img_size/patch_size)**2)
+        #     keep_ratio = token_ratio[i]
+        #     prev_keep_ratio = 1 if i == 0 else token_ratio[i-1]
+        #     sequence_length = math.ceil(sequence_length*(1-keep_ratio)) - math.ceil(sequence_length*(1-prev_keep_ratio))
+        #     aggregator_list.append(
+        #         PredictorAggregator(sequence_length, embed_dim=embed_dim))
+        #
+        # self.aggregator = nn.ModuleList(aggregator_list)
+        # self.reconstructor = PredictorReconstructor(embed_dim)
 
         ########################################  DYNAMIC VIT MODIFICATONS #############################################
         # the number of kept tokens during training at each prediction module
@@ -768,6 +766,7 @@ class VisionTransformerDiffPruning(nn.Module):
         self.min_keep_ratio = None
         self.avg_keep_ratio = None
         self.max_keep_ratio = None
+        self.unpruned = False
         ################################################################################################################
 
         self.distill = distill
@@ -786,6 +785,10 @@ class VisionTransformerDiffPruning(nn.Module):
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
+
+        # trunc_normal_(self.pos_embed_dist_token, std=.02)
+        # trunc_normal_(self.dist_token, std=.02)
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -815,8 +818,9 @@ class VisionTransformerDiffPruning(nn.Module):
         B, N, D = x.shape
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        # dist_tokens = self.dist_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
+        x = x + self.pos_embed  #torch.cat((self.pos_embed, self.pos_embed_dist_token), dim=1)
         x = self.pos_drop(x)
 
         p_count = 0
@@ -827,8 +831,11 @@ class VisionTransformerDiffPruning(nn.Module):
 
         self.num_kept_tokens = []
         self.cls_attns = []
-        self.dropped_token_indices = None
-        self.kept_token_indices = torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
+        self.pred_logits = []
+        self.kept_token_indices = []  #torch.arange(N, device=x.device, dtype=torch.long).unsqueeze(0).repeat(B, 1)
+        self.dropped_token_indices = []
+
+        self.cls_attns = []
 
         keep_mask = torch.ones((B, N+1), dtype=x.dtype, device=x.device)
         # self.encoder_start.record()
@@ -838,121 +845,92 @@ class VisionTransformerDiffPruning(nn.Module):
             ############################################################################################################
             # at a layer where pruning happens
             if i in self.pruning_loc:
-                spatial_x = x[:, 1:]  # shape: (B, N, D)
                 ########################################################################################################
                 ################################### TOP-K SCORE GENERATION #############################################
                 ########################################################################################################
-                if self.topk_selection:
-                    ################## USE CLS ATTENTION WEIGHTS FROM TEACHER AS PATCH IMPORTANCE METRIC ###############
-                    if stacked_cls_attn_weights is not None:
-                        # sum weights across all layers and normalize with number of layers
-                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
-                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
-                        if self.mean_heads:
-                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
-                        else:
-                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
-                        pred_score = self.score_predictor[p_count](cls_attn_weights,
-                                                                   current_sigma=self.current_sigma)  # (B, K, N)
-                    #### USE OWN CLS ATTENTION WEIGHTS (FROM LAYER BEFORE PRUNING LAYER) AS PATCH IMPORTANCE METRIC ####
-                    else:
-                        if self.random_drop and i == 0:
-                            # dummy pred score in case no CLS attention weights are available (because we prune before
-                            # the 1st layer) --> only possible for random patch drop as the score is not used either way
-                            pred_score = torch.zeros((B, N), device=spatial_x.device)
-                        else:
-                            # self.pred_start.record()
-                            pred_logits, pred_score = self.score_predictor[p_count](
-                                # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1),
-                                spatial_x, current_sigma=self.current_sigma)  # (B, K, N)
-                            # self.pred_end.record()
-                ########################################################################################################
-                ############################### DYNAMIC VIT SCORE GENERATION ###########################################
-                ########################################################################################################
-                else:
-                    ################## USE CLS ATTENTION WEIGHTS FROM TEACHER AS PATCH IMPORTANCE METRIC ###############
-                    if stacked_cls_attn_weights is not None:
-                        # sum weights across all layers and normalize with number of layers
-                        cls_attn_weights = torch.mean(stacked_cls_attn_weights, dim=1)
-                        # cls_attn_weights = stacked_cls_attn_weights[:, -1]
-                        if self.mean_heads:
-                            cls_attn_weights = torch.mean(cls_attn_weights[:, :, 1:], dim=1)
-                        else:
-                            cls_attn_weights, _ = torch.max(cls_attn_weights[:, :, 1:], dim=1)
-                        pred_score = self.score_predictor[p_count](cls_attn_weights,
-                                                                   policy=prev_decision).reshape(B, -1, 2)
-                    #### USE OWN CLS ATTENTION WEIGHTS (FROM LAYER BEFORE PRUNING LAYER) AS PATCH IMPORTANCE METRIC ####
-                    else:
-                        pred_logits, pred_score = self.score_predictor[p_count](
-                            # torch.cat((spatial_x, x[:, 0:1].expand(-1, N, -1)), dim=-1), policy=prev_decision)
-                            spatial_x, policy=prev_decision)
-                        pred_score = pred_score.reshape(B, -1, 2)
-                    self.current_score = pred_score.detach().clone()
+                # self.pred_start.record()
+                num_keep_node = int(init_n * self.token_ratio[p_count])
+                # cls_attns = torch.stack(self.cls_attns, dim=1)  # (B, L, H, N)
+                # cls_attns = torch.max(torch.mean(cls_attns, dim=1), dim=1)[0]
+                pred_logits, pred_score = self.score_predictor[p_count](x[:, 1:]) #cls_attns
+
+                if self.patch_score_threshold is None:
+                    sorted_pred_score = torch.argsort(pred_score, dim=1, descending=True)
+                    kept_idxs = sorted_pred_score[:, :num_keep_node]
+                    dropped_idxs = sorted_pred_score[:, num_keep_node:]
+                    kept_idxs = torch.sort(kept_idxs, dim=1)[0]
+                    dropped_idxs = torch.sort(dropped_idxs, dim=1)[0]
+                    self.kept_token_indices.append(kept_idxs)
+                    self.dropped_token_indices.append(dropped_idxs)
+                    self.pred_logits.append(pred_logits)
+                # if p_count == 0:
+                #     pred_logits, pred_score = self.score_predictor[p_count](x[:, 1:])
+                # else:
+                #     pred_logits, pred_score = self.score_predictor[p_count](x[:, 1:-1-(p_count-1)])
+                # cls_policy = torch.zeros(B, 1, dtype=sorted_scores.dtype, device=sorted_scores.device)
+                # now_policy = torch.cat([cls_policy, sorted_scores + 1], dim=1)
+                # x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                # self.pred_end.record()
                 ########################################################################################################
                 ################################### PRUNING DURING TRAINING ############################################
                 ########################################################################################################
                 if self.training:
                     ########### PATCH DROP VIA INDICATOR (WEIGHTED AVERAGE OF MOST IMPORTANT PATCHES) MAT MULT #########
-                    if self.topk_selection:
-                        cls_x = x[:, 0:1]
-                        if self.patch_score_threshold is not None:
-                            val, idx = torch.sort(pred_score.detach().clone())
-                            cum_sum = torch.cumsum(val, dim=-1)
-                            th = (cum_sum > self.patch_score_threshold).float().to(x.device)
-                            self.keep_ratios = torch.sum(th, dim=1).detach().clone()/N
-                            self.min_keep_ratio = torch.min(self.keep_ratios).item()
-                            self.avg_keep_ratio = torch.mean(self.keep_ratios).item()
-                            self.max_keep_ratio = torch.max(self.keep_ratios).item()
-                            spatial_mask = torch.empty((B, N), device=x.device, dtype=x.dtype)
-                            spatial_mask = torch.scatter(input=spatial_mask, dim=1, index=idx, src=th)
-                            cls_mask = torch.ones(B, 1, dtype=x.dtype, device=x.device)
-                            keep_mask = torch.cat((cls_mask, spatial_mask), dim=1)
-                            x = blk(x, policy=keep_mask.unsqueeze(-1))
-                        else:
-                            # multiply transposed indicators with tokens to obtain differentiable topK selection
-                            # spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
-                            num_keep_node = int(init_n * self.token_ratio[p_count])
-                            # always keep cls token
-                            # x = torch.cat((cls_x, spatial_x), dim=1)
-                            keep_policy = torch.argsort(pred_score, dim=1, descending=True)[:, :num_keep_node]
-                            #keep_policy = torch.gather(torch.argsort(pred_score, dim=1, descending=True), dim=-1,
-                            cls_policy = torch.zeros(B, 1, dtype=keep_policy.dtype, device=keep_policy.device)
-                            now_policy = torch.cat([cls_policy, keep_policy + 1], dim=1)
-                            x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
-                            x = blk(x)
-                    ############# PATCH DROP VIA MASKED SELF ATTENTION WITH POLICY (SEE DYNAMIC VIT PAPER) #############
+                    #cls_x = x[:, 0:1]
+                    if self.patch_score_threshold is not None:
+                        val, idx = torch.sort(pred_score.detach().clone())
+                        cum_sum = torch.cumsum(val, dim=-1)
+                        th = (cum_sum > self.patch_score_threshold).to(x.device)
+                        self.keep_ratios = torch.sum(th, dim=1).detach().clone()/N
+                        self.min_keep_ratio = torch.min(self.keep_ratios).item()
+                        self.avg_keep_ratio = torch.mean(self.keep_ratios).item()
+                        self.max_keep_ratio = torch.max(self.keep_ratios).item()
+                        spatial_mask = torch.empty((B, N), device=x.device, dtype=torch.bool)
+                        spatial_mask = torch.scatter(input=spatial_mask, dim=1, index=idx, src=th)
+                        self.kept_token_indices.append(spatial_mask.unsqueeze(-1).repeat(1, 1, D).flatten())
+                        self.dropped_token_indices.append(~spatial_mask.unsqueeze(-1).repeat(1, 1, D).flatten())
+                        cls_mask = torch.ones(B, 1, dtype=x.dtype, device=x.device)
+                        keep_mask = torch.cat((cls_mask, spatial_mask), dim=1).float()
+                        x = blk(x, policy=keep_mask.unsqueeze(-1))
                     else:
-                        hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 1:] * prev_decision
-                        self.num_kept_tokens.append(torch.mean(torch.sum(hard_keep_decision.detach(), dim=1)/
-                                                               hard_keep_decision.shape[1]))
-                        out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
-                        cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
-                        policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
-                        x = blk(x, policy=policy)
-                        prev_decision = hard_keep_decision
+                        # multiply transposed indicators with tokens to obtain differentiable topK selection
+                        # spatial_x = pred_score @ spatial_x  # shape: (B, K, D)
+                        # num_keep_node = int(init_n * self.token_ratio[p_count])
+                        # always keep cls token
+                        #x = torch.cat((cls_x, spatial_x), dim=1)
+                        #keep_policy = torch.argsort(pred_score, dim=1, descending=True)[:, :num_keep_node]
+                        #sorted_scores = torch.argsort(pred_score, dim=-1, descending=True)
+                        #keep_policy = torch.gather(torch.argsort(pred_score, dim=1, descending=True), dim=-1,
+                        #cls_policy = torch.zeros(B, 1, dtype=keep_policy.dtype, device=keep_policy.device)
+                        #now_policy = torch.cat([cls_policy, keep_policy + 1], dim=1)
+
+                        cls_policy = torch.zeros(B, 1, dtype=self.kept_token_indices[-1].dtype,
+                                                 device=self.kept_token_indices[-1].device)
+                        # dist_policy = torch.ones(B, 1, dtype=self.kept_token_indices[-1].dtype,
+                        #                        device=self.kept_token_indices[-1].device)
+                        now_policy = torch.cat([cls_policy, self.kept_token_indices[-1] + 1], dim=1)
+                        x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+                        # x_agg = torch.gather(x, dim=1, index=(dropped_idxs + 1).unsqueeze(-1).expand(-1, -1, D))
+                        # x_agg = self.aggregator[p_count](x_agg)
+                        # x_kept = torch.gather(input=x, dim=1,
+                        #                       index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                        # if p_count == 0:
+                        #     x = torch.cat((x_kept, x_agg), dim=1)
+                        # else:
+                        #     x_agg_prev = x[:, -(1 + p_count - 1):]
+                        #     x = torch.cat((x_kept, x_agg, x_agg_prev), dim=1)
+
+                        x, cls_attn = blk(x, return_cls_attn=True)
+                        self.cls_attns.append(cls_attn[:, :, 1:])
                 ########################################################################################################
                 ################################## PRUNING DURING INFERENCE ############################################
                 ########################################################################################################
                 # during inference return just the patches with the highest scores
                 else:
-                    ########################### RANDOM DROP: RANDOMLY SELECT INDICES OF KEPT TOKENS ####################
-                    if self.random_drop:
-                        # randomly drop patches
-                        # random shuffle of keep policy for each image in the batch
-                        idxs = []
-                        for _ in range(B):
-                            idxs.append(torch.randperm(N))
-                        idxs = torch.stack(idxs, dim=0).to(spatial_x.device)
-                        # keep_policy = torch.gather(index=idxs, input=keep_policy, dim=1)
-                        keep_policy = idxs
-                    elif self.topk_selection:
-                        score = pred_score
-                        # sort score in descending order and take top most according to keep ratio
-                        keep_policy = torch.argsort(score, dim=1, descending=True)
-                    else:
-                        score = pred_score[:, :, 1]
-                        # sort score in descending order and take top most according to keep ratio
-                        keep_policy = torch.argsort(score, dim=1, descending=True)
+                    #score = pred_score
+                    # sort score in descending order and take top most according to keep ratio
+                    #keep_policy = torch.argsort(score, dim=1, descending=True)
 
                     if self.patch_score_threshold is not None:
                         val, idx = torch.sort(score.detach().clone())
@@ -962,66 +940,79 @@ class VisionTransformerDiffPruning(nn.Module):
                         self.min_keep_ratio = torch.min(self.keep_ratios).item()
                         self.avg_keep_ratio = torch.mean(self.keep_ratios).item()
                         self.max_keep_ratio = torch.max(self.keep_ratios).item()
-                        num_keep_node = int(torch.sum(th))
+                        spatial_mask = torch.empty((B, N), device=x.device, dtype=x.dtype)
+                        spatial_mask = torch.scatter(input=spatial_mask, dim=1, index=idx, src=th)
+                        cls_mask = torch.ones(B, 1, dtype=x.dtype, device=x.device)
+                        keep_mask = torch.cat((cls_mask, spatial_mask), dim=1)
+                        keep_mask = keep_mask.unsqueeze(-1).repeat(1, 1, D).flatten()
+                        x = x.flatten()[keep_mask].reshape(B, -1, D)
+                        x = blk(x)
                     else:
                         # determine number of kept tokens according to keep ratio and number of total tokens
-                        num_keep_node = int(init_n * self.token_ratio[p_count])
+                        # num_keep_node = int(init_n * self.token_ratio[p_count])
 
-                    drop_policy = keep_policy.detach().clone()[:, num_keep_node:]
-                    keep_policy = keep_policy[:, :num_keep_node]
-                    now_dropped_indices = torch.gather(self.kept_token_indices, index=drop_policy, dim=1)
-                    if self.dropped_token_indices is None:
-                        self.dropped_token_indices = now_dropped_indices
-                    else:
-                        self.dropped_token_indices = torch.cat((self.dropped_token_indices, now_dropped_indices), dim=1)
-                    self.kept_token_indices = torch.gather(self.kept_token_indices, index=keep_policy.detach(), dim=1)
-                    cls_policy = torch.zeros(B, 1, dtype=keep_policy.dtype, device=keep_policy.device)
-                    now_policy = torch.cat([cls_policy, keep_policy + 1], dim=1)
-                    # x = batch_index_select(x, now_policy)  # shape: B, N, D
-                    x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
-                    # prev_decision = batch_index_select(prev_decision, keep_policy)  # shape: B, N, 1
-                    prev_decision = torch.gather(input=prev_decision, dim=1, index=keep_policy.unsqueeze(-1))
-                    x = blk(x)
+                        cls_policy = torch.zeros(B, 1, dtype=self.kept_token_indices[-1].dtype,
+                                                 device=self.kept_token_indices[-1].device)
+                        # dist_policy = torch.ones(B, 1, dtype=self.kept_token_indices[-1].dtype,
+                        #                          device=self.kept_token_indices[-1].device)
+                        now_policy = torch.cat([cls_policy, self.kept_token_indices[-1] + 1], dim=1)
+
+                        x = torch.gather(input=x, dim=1, index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+                        # if not self.unpruned:
+                        #     x_agg = torch.gather(x, dim=1, index=(dropped_idxs + 1).unsqueeze(-1).expand(-1, -1, D))
+                        #     # x_agg *= torch.gather(pred_score, dim=1, index=dropped_idxs).unsqueeze(-1).expand(-1, -1, D)
+                        #     # x_agg = torch.sum(x_agg, dim=1, keepdim=True)
+                        #     x_agg = self.aggregator[p_count](x_agg)
+                        #     x_kept = torch.gather(input=x, dim=1,
+                        #                           index=now_policy.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                        #     if p_count == 0:
+                        #         x = torch.cat((x_kept, x_agg), dim=1)
+                        #     else:
+                        #         x_agg_prev = x[:, -(1 + p_count - 1):]
+                        #         x = torch.cat((x_kept, x_agg, x_agg_prev), dim=1)
+                        x, cls_attn = blk(x, return_cls_attn=True)
+                        self.cls_attns.append(cls_attn[:, :, 1:])
                 p_count += 1
             ############################################################################################################
             ######################################## NON-PRUNING ENCODER LAYER #########################################
             ############################################################################################################
             else:
                 if self.training:
-                    if self.topk_selection:
-                        if self.patch_score_threshold is not None:
-                            x = blk(x, policy=keep_mask.unsqueeze(-1))
-                        else:
-                            x = blk(x)
+                    if self.patch_score_threshold is not None:
+                        x = blk(x, policy=keep_mask.unsqueeze(-1))
                     else:
-                        # apply attention policy during Dynamic ViT training
-                        x = blk(x, policy=policy)
+                        x, cls_attn = blk(x, return_cls_attn=True)
+                        self.cls_attns.append(cls_attn[:, :, 1:])
                 else:
-                    x = blk(x)
+                    x, cls_attn = blk(x, return_cls_attn=True)
+                    self.cls_attns.append(cls_attn[:, :, 1:])
 
         # self.encoder_end.record()
 
-        # self.head_start.record()
         x = self.norm(x)
         features = x[:, 1:]
+
+        # if self.training:
+        #     features = x[:, 1:-len(self.pruning_loc)]
+        #     x_reconstructed = []
+        #     for i, idx in enumerate(self.dropped_token_indices):
+        #         dropped_tokens = x[:, -3+i].unsqueeze(1).repeat(1, idx.shape[1], 1)
+        #         x_reconstructed.append(self.reconstructor(dropped_tokens))
+
         x = x[:, 0]
+        # self.head_start.record()
         x = self.pre_logits(x)
         x = self.head(x)
         # self.head_end.record()
 
         if self.training:
-            if self.topk_selection:
-                if self.patch_score_threshold is not None:
-                    return x, features, pred_logits, keep_mask[:, 1:]  #keep_policy
-                else:
-                    return x, features, pred_logits, keep_policy
-            if self.distill:
-                # return the final logits, final spatial tokens,
-                return x, features, prev_decision.detach(), pred_logits, out_pred_prob
+            if self.patch_score_threshold is not None:
+                return x, features, pred_logits, keep_mask[:, 1:]  #keep_policy
             else:
-                return x, out_pred_prob
+                return x, features, self.pred_logits, self.kept_token_indices #, x_reconstructed
         else:
-            return x, self.cls_attns, pred_logits, now_policy
+            return x, self.cls_attns, self.pred_logits, self.kept_token_indices
 
 
     def forward_cls_attn(self, x):
