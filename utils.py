@@ -17,14 +17,30 @@ def get_model(args, pretrained=True):
                          and callable(models.__dict__[name]))
     if 'deit_small_dist_masked' in args['model_name']:
         model = vit_models.deit_small_patch16_224_masked(pretrained=pretrained)
-    elif 'default_dynamic_vit_student' in args['model_name']:
+    elif 'default_dynamic_vit_tiny_student' in args['model_name']:
+        model = vit_models.default_dynamic_vit_tiny_patch16_224_student()
+    elif 'default_dynamic_vit_small_student' in args['model_name']:
         model = vit_models.default_dynamic_vit_small_patch16_224_student()
-    elif 'default_dynamic_vit_teacher' in args['model_name']:
+    elif 'default_dynamic_vit_base_student' in args['model_name']:
+        model = vit_models.default_dynamic_vit_base_patch16_224_student()
+    elif 'default_dynamic_vit_tiny_teacher' in args['model_name']:
+        model = vit_models.default_dynamic_vit_tiny_patch16_224_teacher()
+    elif 'default_dynamic_vit_small_teacher' in args['model_name']:
         model = vit_models.default_dynamic_vit_small_patch16_224_teacher()
-    elif 'dynamic_vit_student' in args['model_name']:
+    elif 'default_dynamic_vit_base_teacher' in args['model_name']:
+        model = vit_models.default_dynamic_vit_base_patch16_224_teacher()
+    elif 'dynamic_vit_tiny_student' in args['model_name']:
+        model = vit_models.dynamic_vit_tiny_patch16_224_student()
+    elif 'dynamic_vit_small_student' in args['model_name']:
         model = vit_models.dynamic_vit_small_patch16_224_student()
-    elif 'dynamic_vit_teacher' in args['model_name']:
+    elif 'dynamic_vit_base_student' in args['model_name']:
+        model = vit_models.dynamic_vit_base_patch16_224_student()
+    elif 'dynamic_vit_tiny_teacher' in args['model_name']:
+        model = vit_models.dynamic_vit_tiny_patch16_224_teacher()
+    elif 'dynamic_vit_small_teacher' in args['model_name']:
         model = vit_models.dynamic_vit_small_patch16_224_teacher()
+    elif 'dynamic_vit_base_teacher' in args['model_name']:
+        model = vit_models.dynamic_vit_base_patch16_224_teacher()
     elif 'deit_small_dist_predictor' in args['model_name']:
         model = vit_models.deit_small_patch16_224_predictor(pretrained=pretrained)
     elif 'deit_small_dist' in args['model_name']:
@@ -215,5 +231,41 @@ def parse_args():
     parser.add_argument('--patch-score-threshold',
                         help='Value to threshold cumulative sum of sorted predicted patch scores',
                         default=None, type=float)
+
+    # Augmentation parameters
+    parser.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
+                        help='Color jitter factor (default: 0.4)')
+    parser.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME',
+                        help='Use AutoAugment policy. "v0" or "original". " + \
+                                 "(default: rand-m9-mstd0.5-inc1)'),
+    parser.add_argument('--smoothing', type=float, default=0.1, help='Label smoothing (default: 0.1)')
+    parser.add_argument('--train-interpolation', type=str, default='bicubic',
+                        help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
+
+    parser.add_argument('--repeated-aug', action='store_true')
+    parser.add_argument('--no-repeated-aug', action='store_false', dest='repeated_aug')
+    parser.set_defaults(repeated_aug=True)
+    # * Random Erase params
+    parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
+                        help='Random erase prob (default: 0.25)')
+    parser.add_argument('--remode', type=str, default='pixel',
+                        help='Random erase mode (default: "pixel")')
+    parser.add_argument('--recount', type=int, default=1,
+                        help='Random erase count (default: 1)')
+    parser.add_argument('--resplit', action='store_true', default=False,
+                        help='Do not random erase first (clean) augmentation split')
+    # * Mixup params
+    parser.add_argument('--mixup', type=float, default=0.8,
+                        help='mixup alpha, mixup enabled if > 0. (default: 0.8)')
+    parser.add_argument('--cutmix', type=float, default=1.0,
+                        help='cutmix alpha, cutmix enabled if > 0. (default: 1.0)')
+    parser.add_argument('--cutmix-minmax', type=float, nargs='+', default=None,
+                        help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
+    parser.add_argument('--mixup-prob', type=float, default=1.0,
+                        help='Probability of performing mixup or cutmix when either/both is enabled')
+    parser.add_argument('--mixup-switch-prob', type=float, default=0.5,
+                        help='Probability of switching to cutmix when both mixup and cutmix enabled')
+    parser.add_argument('--mixup-mode', type=str, default='batch',
+                        help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
     return parser.parse_args()
