@@ -1,266 +1,152 @@
 import torch
 from torch.nn import functional as F
+from timm.loss import SoftTargetCrossEntropy
 
-class DistillDiffPruningLoss(torch.nn.Module):
-    """
-    This module wraps a standard criterion and adds an extra knowledge distillation loss by
-    taking a teacher model prediction and using it as additional supervision.
-    """
 
-    def __init__(self, args, teacher_model, base_criterion: torch.nn.Module, ratio_weight=2.0, distill_weight=0.5,
-                 dynamic=False, pruning_loc=[3], keep_ratio=[0.3], clf_weight=1.0, mse_token=False, softmax_temp=1.0,
-                 print_mode=True, early_exit=False):
+class MaskLoss(torch.nn.Module):
+    def __init__(self, args, phase):
         super().__init__()
-        self.teacher_model = teacher_model
-        self.base_criterion = base_criterion
-        self.clf_weight = clf_weight
-        self.pruning_loc = pruning_loc
-        self.keep_ratio = keep_ratio
-        self.count = 0
-        self.print_mode = print_mode
-        self.cls_loss = 0
-        self.ratio_loss = 0
-        self.cls_distill_loss = 0
-        self.token_distill_loss = 0
-        self.early_exit_cls_loss = 0
-        self.early_exit_cls_distill_loss = 0
-        self.mse_token = mse_token
-        self.dynamic = dynamic
+        self.phase = phase
+        self.keep_ratios = args.keep_ratios
+        self.loss_type = args.mask_loss_type
+        self.count = 1
+        self.running_loss = 0
+        self.runnings_accs = [0 for _ in self.keep_ratios]
 
-        self.ratio_weight = ratio_weight
-        self.distill_weight = distill_weight
-
-        self.topk_selection = args.topk_selection
-        self.use_ratio_loss = args.use_ratio_loss
-        self.use_token_dist_loss = args.use_token_dist_loss
-        self.use_teacher_cls_loss = args.teacher_cls_loss
-
-        if self.use_teacher_cls_loss:
+        if self.loss_type == "bce":
             # for pixel-wise crossentropy loss
             # as the classes (1: kept token, 0: dropped token) we use a weight for the positive class to counteract
             # this class imbalance
-            kept_token_weights = torch.ones(size=(1,)) * (1 - args.keep_ratios[0]) / args.keep_ratios[0]
-            dropped_token_weights = torch.ones_like(kept_token_weights)
-            weights = torch.cat((kept_token_weights, dropped_token_weights)).to(args.device)
-            self.bce_loss_teacher_cls = torch.nn.CrossEntropyLoss(weight=weights)
-
-        self.mean_heads = args.mean_heads
-
-        # temperature value used for distillation loss parts
-        self.T = softmax_temp
-
-        self.early_exit = early_exit
-
-        print('cls_weight=', clf_weight, 'distill_weight=', distill_weight, 'softmax_temp=', softmax_temp)
-        if not self.topk_selection and self.use_token_dist_loss:
-            print('using KL divergence of final layer tokens in loss function (weight: see distill_weight above)')
-        if not self.topk_selection and self.use_ratio_loss:
-            print(f'using ratio of kept tokens in loss function, weight={ratio_weight}')
-
-        if dynamic:
-            print('using dynamic loss')
-
-        if self.topk_selection:
-            print('using differentiable top-k instead of Gumbel softmax for patch importance selection')
-
-    def forward(self, inputs, outputs, labels):
-        """
-        Args:
-            inputs: The original inputs that are feed to the teacher model
-            outputs: the outputs of the model to be trained. It is expected to be
-                either a Tensor, or a Tuple[Tensor, Tensor], with the original output
-                in the first position and the distillation predictions as the second output
-            labels: the labels for the base criterion
-        """
-
-        if self.topk_selection:
-            # class probabilities, final layer tokens (without CLS), indices of kept input data
-            student_logits, predictor_logits, spatial_tokens = outputs
-        elif self.early_exit:
-            # predictions, final layer tokens (without CLS), final token keep decisions, all token keep decisions
-            student_logits, early_exit_pred, spatial_tokens, mask, predictor_keep_prob = outputs
-        else:
-            student_logits, spatial_tokens, mask, predictor_logits, predictor_keep_prob = outputs
-
-        # crossentropy loss between student predictions and ground truth labels
-        cls_loss = self.base_criterion(student_logits, labels)
-
-        with torch.no_grad():
-            if self.use_teacher_cls_loss:
-                teacher_logits, token_t, cls_attn_weights = self.teacher_model(
-                    inputs, return_cls_attns=True)  # 3rd return value is final CLS token attention weights
-                gt_patch_drop_mask = get_mask_from_cls_attns(cls_attn_weights, args.keep_ratios[0],
-                                                             mean_heads=self.mean_heads)
-
-                num_same_mask_elements = torch.sum(pred_keep_mask.detach() == gt_patch_drop_mask.detach())
-                num_different_mask_elements = torch.sum(pred_keep_mask.detach() != gt_patch_drop_mask.detach())
-                total_mask_elements = num_same_mask_elements + num_different_mask_elements
-                assert (total_mask_elements == pred_keep_mask.numel()), "Number of same and different elements in both " \
-                                                                        "masks do not sum up to the total number of patches"
-
-                # ground truth drop mask: 0 --> drop, 1--> keep
-                # labels/classes for bce loss function: 0--> keep, 1--> drop
-                patch_wise_labels = (1 - gt_patch_drop_mask).long().to(args.device)
-                mask_ce_loss = self.bce_loss_teacher_cls(pred_scores.flatten(start_dim=0, end_dim=1),
-                                                         patch_wise_labels.flatten())
-                if i % 50 == 0:
-                    # print(f'training step_{i} mask_mse_loss: {mse_loss.detach().item():.4f}, '
-                    #       f'cls_loss: {cls_loss.detach().item():.4f}, '
-                    #       f'acc: {(torch.sum(preds == train_labels.data) / train_labels.shape[0]).item():.4f}')
-                    print(f'training step_{i} pixel_wise_ce_loss: {train_loss.detach().item():.4f}, '
-                          f'cls_loss: {cls_loss.detach().item():.4f}, '
-                          f'acc: {(torch.sum(preds == train_labels.data) / train_labels.shape[0]).item():.4f}')
-                    print(f'Number of elements where masks differ for whole batch: {num_different_mask_elements}')
-            else:
-                # teacher logits and spatial tokens
-                teacher_logits, token_t = self.teacher_model(inputs)  # 3rd return value is final CLS token attention weights
-
-        # KL divergence between student class probabilities and teacher class probabilities
-        cls_kl_loss = F.kl_div(
-            F.log_softmax(student_logits/self.T, dim=-1),
-            F.log_softmax(teacher_logits/self.T, dim=-1),
-            reduction='batchmean',
-            log_target=True
-        ) * (self.T ** 2)
-
-        # early exit losses computed from CLS token predictions of student network in the layer before the pruning stage
-        if self.early_exit:
-            # cross entropy loss between student early exit predictions from cls token and ground truth labels
-            early_exit_cls_loss = self.base_criterion(early_exit_pred, labels)
-
-            # KL divergence between early exit student class probabilities and teacher class probabilities
-            early_exit_cls_distill_loss = F.kl_div(
-                F.log_softmax(early_exit_pred/self.T, dim=-1),
-                F.log_softmax(teacher_logits/self.T, dim=-1),
-                reduction='batchmean',
-                log_target=True
-            ) * (self.T ** 2)
-
-        if self.topk_selection:
-            #token_kl_loss = F.kl_div(
-            #    F.log_softmax(spatial_tokens, dim=-1),
-            #    F.log_softmax(token_t, dim=-1),
-            #    reduction='batchmean',
-            #    log_target=True
-            #)
-            loss = self.clf_weight * cls_loss + self.distill_weight * cls_kl_loss #+ self.distill_weight * token_kl_loss
-
-        else:
-            if self.use_ratio_loss:
-                # ratio loss
-                pred_loss = 0.0
-                ratio = self.keep_ratio
-                for i, score in enumerate(predictor_keep_prob):
-                    if self.dynamic:
-                        pos_ratio = score.mean()
-                    else:
-                        pos_ratio = score.mean(1)
-                    pred_loss = pred_loss + ((pos_ratio - ratio[i]) ** 2).mean()
-
-            if self.use_token_dist_loss:
-                # final token distillation loss
-                B, N, C = spatial_tokens.size()
-                assert mask.numel() == B * N
-                bool_mask = mask.reshape(B * N) > 0.5
-                spatial_tokens = spatial_tokens.reshape(B * N, C)
-                token_t = token_t.reshape(B * N, C)
-                if mask.sum() < 0.1:
-                    token_kl_loss = spatial_tokens.new(1, ).fill_(0.0)
+            mask_loss_fns = []
+            for i, ratio in enumerate(args.keep_ratios):
+                if i > 0:
+                    curr_ratio = ratio / args.keep_ratios[i - 1]
                 else:
-                    token_t = token_t[bool_mask]
-                    spatial_tokens = spatial_tokens[bool_mask]
-                    if self.mse_token:
-                        token_kl_loss = torch.pow(spatial_tokens - token_t, 2).mean()
-                    else:
-                        # KL divergence between final encoder layer tokens (CLS token excluded)
-                        token_kl_loss = F.kl_div(
-                            F.log_softmax(spatial_tokens, dim=-1),
-                            F.log_softmax(token_t, dim=-1),
-                            reduction='batchmean',
-                            log_target=True
-                        )
+                    curr_ratio = args.keep_ratios[i]
+                dropped_token_weights = torch.ones(size=(args.batch_size,)) * curr_ratio / (1 - curr_ratio)
+                kept_token_weights = torch.ones(size=(args.batch_size,)) * (1 - curr_ratio) / curr_ratio
+                weights = torch.cat((dropped_token_weights, kept_token_weights)).to(args.device)
+                mask_loss_fns.append(torch.nn.BCEWithLogitsLoss(weight=weights[1], reduction='mean'))
+            self.bce_loss_fns = mask_loss_fns
 
-            # print(cls_loss, pred_loss)
-            loss = self.clf_weight * cls_loss + self.distill_weight * cls_kl_loss
-            if self.early_exit:
-                loss += early_exit_cls_loss + early_exit_cls_distill_loss
-            if self.use_ratio_loss:
-                loss += self.ratio_weight * pred_loss / len(self.pruning_loc)
-            if self.use_token_dist_loss:
-                loss += self.distill_weight * token_kl_loss
+    def forward(self, pred_logits, cls_attn_weights, kept_token_idx, metrics):
 
-        if self.print_mode:
-            self.cls_loss += cls_loss.detach().item() * self.clf_weight
-            self.cls_distill_loss += cls_kl_loss.detach().item() * self.distill_weight
-
-            if self.early_exit:
-                self.early_exit_cls_loss += early_exit_cls_loss.detach().item()
-                self.early_exit_cls_distill_loss += early_exit_cls_distill_loss.detach().item()
-
-            if not self.topk_selection and self.use_ratio_loss:
-                self.ratio_loss += pred_loss.detach().item() * self.ratio_weight
-            if not self.topk_selection and self.use_token_dist_loss:
-                self.token_distill_loss += token_kl_loss.detach().item() * self.distill_weight
-
-            self.count += 1
-            if self.count % 100 == 1:
-                if self.topk_selection:
-                    print(f'loss info: cls_loss={(self.cls_loss / self.count):.4f}, '
-                          f'cls_kl={(self.cls_distill_loss / self.count):.4f}')
+        mask_loss = 0
+        mask_accs = [0 for _ in self.keep_ratios]
+        if self.loss_type == "bce":
+            # 0 in predicted logits --> negative class/dropped patches, 1 in predicted logits --> positive class/kept patches
+            # 0 in predicted mask/ground truth mask --> drop patch, 1 in predicted mask/ground truth mask --> keep patch
+            # 0 in patch wise labels --> negative class/dropped patches, 1 in patch wise labels --> positive class/kept patches
+            # gt_patch_drop_mask:  0 --> dropped token, 1 --> kept token
+            # labels: 0 --> class 0 or dropped token, 1 --> class 1 or kept token
+            # BCE div loss for keep mask prediction task
+            cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+            cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+            renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1,
+                                                                   keepdim=True)
+            for i in range(len(kept_token_idx)):
+                if i > 0:
+                    gt_patch_drop_mask = self.get_mask_from_cls_attns(torch.gather(renormalized_cls, 1,
+                                                                              kept_token_idx[i - 1]),
+                                                                 self.keep_ratios[i] / self.keep_ratios[i - 1])
+                    pred_keep_mask = self.get_mask_from_pred_logits(pred_logits[i],
+                                                               self.keep_ratios[i] / self.keep_ratios[i - 1])
                 else:
-                    loss_info = f'loss info: cls_loss={(self.cls_loss / self.count):.4f},   ' \
-                                f'cls_kl={(self.cls_distill_loss / self.count):.4f}'
-                    if self.early_exit:
-                        loss_info += f'   ee_cls_loss={(self.early_exit_cls_loss / self.count):.4f},    ' \
-                                     f'ee_cls_kl={(self.early_exit_cls_distill_loss / self.count):.4f}'
-                    if self.use_ratio_loss:
-                        loss_info += f',   ratio loss={(self.ratio_loss/self.count):.4f}'
-                    if self.use_token_dist_loss:
-                        loss_info += f',   final_token_kl={(self.token_distill_loss/self.count):.4f}'
-                    print(loss_info)
-        return loss
+                    gt_patch_drop_mask = self.get_mask_from_cls_attns(renormalized_cls, self.keep_ratios[i])
+                    pred_keep_mask = self.get_mask_from_pred_logits(pred_logits[i], self.keep_ratios[i])
+                patch_wise_labels = gt_patch_drop_mask.long().to(args.device)
+                mask_loss += self.mask_criterions[i](pred_logits[i].flatten(start_dim=0, end_dim=1),
+                                                patch_wise_labels.float().flatten())
+                mask_accs[i] += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
+        elif self.loss_type == "mse":
+            # MSE loss for keep mask prediction task
+            cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+            cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+            renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1,
+                                                                   keepdim=True)
+            pred_keep_mask = self.get_mask_from_pred_logits(F.softmax(pred_logits[0], dim=-1), self.keep_ratios[0])
+            for i in range(len(kept_token_idx)):
+                # KL div loss for keep mask prediction task
+                temp = 1e-2
+                if i > 0:
+                    renormalized_cls = torch.gather(input=renormalized_cls, dim=1, index=kept_token_idx[i - 1])
+                    renormalized_cls /= torch.sum(renormalized_cls, dim=1, keepdim=True)
+                mask_loss += 100 * F.mse_loss(pred_logits[i], renormalized_cls, reduction='mean')
+        else:
+            cls_attn_weights = torch.mean(cls_attn_weights, dim=1)  # (B, H, N+1)
+            cls_attn_weights, _ = torch.max(cls_attn_weights, dim=1)  # (B, N+1)
+            renormalized_cls = cls_attn_weights[:, 1:] / torch.sum(cls_attn_weights[:, 1:], dim=-1,
+                                                                   keepdim=True)
+            for i in range(len(kept_token_idx)):
+                # KL div loss for keep mask prediction task
+                temp = 1e-2
+                if i > 0:
+                    gt_patch_drop_mask = self.get_mask_from_cls_attns(torch.gather(renormalized_cls, 1,
+                                                                              kept_token_idx[i - 1]),
+                                                                 self.keep_ratios[i] / self.keep_ratios[i - 1])
+                    pred_keep_mask = self.get_mask_from_pred_logits(F.softmax(pred_logits[i], dim=-1),
+                                                               self.keep_ratios[i] / self.keep_ratios[i - 1])
+                    renormalized_cls = torch.gather(input=renormalized_cls, dim=1, index=kept_token_idx[i - 1])
+                    renormalized_cls /= torch.sum(renormalized_cls, dim=1, keepdim=True)
+                else:
+                    gt_patch_drop_mask = self.get_mask_from_cls_attns(renormalized_cls, self.keep_ratios[i])
+                    pred_keep_mask = self.get_mask_from_pred_logits(F.softmax(pred_logits[i], dim=-1), self.keep_ratios[i])
+                mask_loss += F.kl_div(F.log_softmax(pred_logits[i], dim=-1), torch.log(renormalized_cls),
+                                      log_target=True, reduction='batchmean')
+                mask_accs[i] += torch.sum(pred_keep_mask == gt_patch_drop_mask) / pred_keep_mask.numel()
+
+        # TP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 1).item()  # keep patch predicted for keep patch class
+        # TN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 0).item()  # drop patch predicted for drop patch class
+        # FP += torch.sum(patch_wise_labels[pred_keep_mask == 1] == 0).item()  # keep patch predicted for drop patch class
+        # FN += torch.sum(patch_wise_labels[pred_keep_mask == 0] == 1).item()  # drop patch predicted for keep patch class
+
+        # metrics[f"{phase} TP"] = TP
+        # metrics[f"{phase} TN"] = TN
+        # metrics[f"{phase} FP"] = FP
+        # metrics[f"{phase} FN"] = FN
+        # metrics[f"{phase} FPR"] = FP / (FP + TN)  # False Positive Rate
+        # metrics[f"{phase} Recall"] = TP / (TP + FN)  # True Positive Rate
+        # metrics[f"{phase} Precision"] = TP / (TP + FP)  # Positive Predictive Value
+
+        self.running_loss += mask_loss.detach().item()
+        metrics[f"{self.phase}_mask_loss"] = self.running_loss / self.count
+        for i, _ in enumerate(self.keep_ratios):
+            self.runnings_accs[i] += mask_accs[i]
+            metrics[f"{self.phase}_mask_acc_{i}"] = self.runnings_accs[i] / self.count
+
+        self.count += 1
+
+        return mask_loss
 
     @staticmethod
-    def get_mask_from_pred_scores(pred_scores, keep_ratio):
+    def get_mask_from_pred_logits(logits, keep_ratio):
         """
-            input: pred_scores, (B, N) the predicted scores for each token in the token sequences in the current batch
+            input: logits, (B, N) the predicted scores for each token in the token sequences in the current batch
             keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
             mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
                         across the attention heads
         """
 
-        sort_idxs = torch.argsort(pred_scores, dim=-1, descending=True)
+        sort_idxs = torch.argsort(logits, dim=-1, descending=True)
 
-        num_kept_tokens = int(pred_scores.shape[-1] * keep_ratio)
-        kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=pred_scores.device)
-        dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=pred_scores.device)
+        num_kept_tokens = int(logits.shape[-1] * keep_ratio)
+        kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=logits.device)
+        dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=logits.device)
         mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
 
         mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
 
         return mask
 
-
     @staticmethod
-    def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
+    def get_mask_from_cls_attns(cls_attns, keep_ratio):
         """
-            input: cls_attns, (B, L, H, N+1) the CLS attention weights from the unpruned teacher network from all the
-                   encoder layers and different attention heads
+            input: cls_attns, (B, N) the CLS attention weights from the unpruned teacher averaged over all layers and
+                                        aggregated over all heads
             keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
             mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
                         across the attention heads
         """
-        # mean across all encoder layers
-        cls_attns = torch.mean(cls_attns, dim=1)
-        if mean_heads:
-            # aggregate across heads via mean
-            cls_attns = torch.mean(cls_attns, dim=1)
-        else:
-            # aggregate across heads via max
-            cls_attns, _ = torch.max(cls_attns, dim=1)
-        # exclude CLS weight
-        cls_attns = cls_attns[:, 1:]
-
         # sort in order to take K highest according to keeping ratio
         sort_idxs = torch.argsort(cls_attns, dim=-1, descending=True)
 
@@ -276,3 +162,81 @@ class DistillDiffPruningLoss(torch.nn.Module):
         mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
 
         return mask
+
+
+class BackboneLoss(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        if args.mixup > 0.:
+            # smoothing is handled with mixup label transform
+            base_criterion = SoftTargetCrossEntropy()
+        else:
+            base_criterion = torch.nn.CrossEntropyLoss()
+        self.base_criterion = base_criterion
+
+        self.patch_score_threshold = args.patch_score_threshold
+        self.count = 1
+        self.running_loss = 0
+        self.running_cls_loss = 0
+        self.running_token_kl_loss = 0
+        self.running_token_dist_loss = 0
+        self.runnings_acc = 0
+
+    def forward(self, logits_s, token_s, logits_t, token_t, kept_token_idx, train_labels, metrics):
+
+        # reconstruction_loss = 0
+        # for i, idx in enumerate(model.dropped_token_indices):
+        #     gt_token = torch.gather(token_t, dim=1, index=idx.unsqueeze(-1).expand(-1, -1, token_t.shape[-1]))
+        #     assert gt_token.shape == token_rec[i].shape
+        #     gt_token = gt_token.flatten()
+        #     token_rec[i] = token_rec[i].flatten()
+        #     reconstruction_loss += F.mse_loss(gt_token, token_rec[i], reduction='mean')
+        # reconstruction_loss /= len(model.dropped_token_indices)
+
+        cls_loss = self.base_criterion(logits_s, train_labels)
+
+        cls_kl_loss = F.kl_div(
+            F.log_softmax(logits_s, dim=-1),
+            F.log_softmax(logits_t, dim=-1),
+            reduction='batchmean',
+            log_target=True
+        )
+        if self.patch_score_threshold is None:
+            # token_t = torch.gather(input=token_t, dim=1,
+            #                        index=kept_token_idx.unsqueeze(-1).expand(-1, -1, token_t.shape[-1]))
+            B, N, C = token_t.size()
+            # kept_token_idx = kept_token_idx.reshape(B * N).long()
+            # token_s = token_s.reshape(-1, C)
+            # token_t = token_t.reshape(B * N, C)
+            # token_s = token_s[kept_token_idx]
+            token_t = torch.gather(input=token_t, dim=1, index=kept_token_idx[-1].unsqueeze(-1).expand(-1, -1, C))
+            # discard the aggregation tokens which are the sum of the dropped tokens at each pruning stage
+            # token_s = token_s[:, :-(1+len(args.keep_ratios)-1)]
+        else:
+            token_t = token_t.flatten()[kept_token_idx[-1]]
+
+        token_s = token_s.reshape(-1, C)
+        token_t = token_t.reshape(-1, C)
+        token_kl_loss = F.kl_div(
+            F.log_softmax(token_s, dim=-1),
+            F.log_softmax(token_t, dim=-1),
+            reduction='batchmean',
+            log_target=True
+        )
+
+        backbone_loss = cls_loss + cls_kl_loss + token_kl_loss
+
+        # statistics
+        self.running_loss += backbone_loss.detach().item()
+        self.running_cls_loss += cls_loss.detach().item()
+        self.running_token_dist_loss += cls_kl_loss.detach().item()
+        self.running_token_kl_loss += token_kl_loss.detach().item()
+
+        # metrics["train_reconstruction_loss"] = running_recon_loss / len(train_data_loader)
+        metrics["train_backbone_loss"] = self.running_loss / self.count
+        metrics["train_cls_loss"] = self.running_cls_loss / self.count
+        metrics["train_token_kl_loss"] = self.running_token_dist_loss / self.count
+        metrics["train_cls_kl_loss"] = self.running_token_kl_loss / self.count
+        self.count += 1
+
+        return backbone_loss
