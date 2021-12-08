@@ -369,8 +369,8 @@ class BatchNormLayer(nn.Module):
 class PredictorLG(nn.Module):
     """ Image to Patch Embedding
     """
-    def __init__(self, embed_dim=384, topk_selection=False, k=None, only_cls_features=False, small_predictor=False,
-                 kl_div_loss=False, use_bn=False):
+    def __init__(self, embed_dim=384, topk_selection=False, k=None, small_predictor=False,
+                 loss_type="kl_div", use_bn=False):
         super().__init__()
 
         self.small_predictor = small_predictor
@@ -542,6 +542,7 @@ class PredictorLG(nn.Module):
             )
         else:
             if small_predictor:
+        self.loss_type = loss_type
                 self.in_conv = nn.Sequential(
                    nn.LayerNorm(embed_dim),
                    nn.Linear(embed_dim, embed_dim),
@@ -584,7 +585,7 @@ class PredictorLG(nn.Module):
             x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
             scores = self.out_conv(x)
 
-            if self.kl_div_loss:
+            if self.loss_type in ["kl_div", "mse"]:
                 # use mse loss/make scores resemble teacher CLS attn weights
                 keep_probs = F.softmax(scores, dim=-1)
             else:

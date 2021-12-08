@@ -686,12 +686,7 @@ if __name__ == '__main__':
             args.patch_selection_method += f'_teacher_cls_loss'
 
         # loss function used for predicted mask vs. ground truth mask from averaged teacher CLS attention
-        if args.use_kl_div_loss:
-            args.patch_selection_method += f'_kl'
-        elif args.use_mse_loss:
-            args.patch_selection_method += f'_mse'
-        else:
-            args.patch_selection_method += f'_bce_ce'
+        args.patch_selection_method += '_' + args.mask_loss_type
 
         # frozen backbone, only train predictor
         if args.freeze_backbone:

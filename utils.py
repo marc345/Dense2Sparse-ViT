@@ -207,12 +207,8 @@ def parse_args():
                         help='Freeze the backbone of the student ViT and train only the predictor network')
     parser.add_argument('--small-predictor', action='store_true', default=False,
                         help='Use the default predictor network architecture as in dynamic vit')
-    parser.add_argument('--use-kl-div-loss', action='store_true', default=False,
-                        help='Use KL divergence between logits from predictor and CLS attention from teacher as loss '
-                             'function for predicted mask')
-    parser.add_argument('--use-mse-loss', action='store_true', default=False,
-                        help='Use mean squared error between logits from predictor and CLS attention from teacher as loss '
-                             'function for predicted mask')
+    parser.add_argument('--mask-loss-type', default='kl_div', type=str,
+                        help="Loss function to use for predictor network: kl_div, mse, bce")
     parser.add_argument('--predictor-bn', action='store_true', default=False,
                         help='Use batch normalization instead of layer normalization in the predictor MLP')
     parser.add_argument('--patch-score-threshold',
