@@ -554,61 +554,7 @@ class PredictorLG(nn.Module):
                 return scores, keep_probs
             else:
                 return scores, keep_probs
-        else:
-            x = self.in_conv(x)
-            B, N, C = x.size()  # C
-            local_x = x[:, :, :C//2]
 
-            if cls_attn is not None:
-                # sum of CLS attentions over all heads as z_global
-                global_x = torch.sum(cls_attn.permute(0, 2, 1), dim=-1, keepdim=True)  # (B, H, N) -> (B, H, 1)
-                # cls_attn shape: (B, H, N+1) slice+permute--> (B, N, H)
-            else:
-                global_x = (x[:, :, C // 2:] * policy).sum(dim=1, keepdim=True) / torch.sum(policy, dim=1, keepdim=True)
-
-            x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
-
-            logits = self.out_conv(x)
-            return logits, F.log_softmax(logits, dim=-1)
-
-
-# class PredictorCNN(nn.Module):
-#     """ Image to Patch Embedding
-#     """
-#     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
-#         super().__init__()
-#         img_size = to_2tuple(img_size)
-#         patch_size = to_2tuple(patch_size)
-#         num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
-#         self.img_size = img_size
-#         self.patch_size = patch_size
-#         self.num_patches = num_patches
-# 
-#         self.proj = nn.Sequential(
-#             nn.Conv2d(3, 64, kernel_size=5),
-#             nn.MaxPool2d(2, 2),
-#             nn.ReLU(),
-#             nn.BatchNorm2d(64),
-#             nn.Conv2d(64, 32, kernel_size=5),
-#             nn.MaxPool2d(2, 2),
-#             nn.BatchNorm2d(32),
-#             nn.Conv2d(32, 16, kernel_size=5),
-#             nn.MaxPool2d(2, 2),
-#         )
-# 
-#     def forward(self, x):
-#         B, C, H, W = x.shape
-#         # FIXME look at relaxing size constraints
-#         assert H == self.img_size[0] and W == self.img_size[1], \
-#             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-#         x = self.proj(x).flatten(2).transpose(1, 2)
-#         return x
-
-class PredictorViT(nn.Module):
-    """ Vision Transformer
-
-    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
-        https://arxiv.org/abs/2010.11929
     """
     def __init__(self, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
