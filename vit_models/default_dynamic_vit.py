@@ -636,6 +636,37 @@ def checkpoint_filter_fn(state_dict, model):
 
 
 @register_model
+def default_dynamic_vit_tiny_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
+    model = DefaultVisionTransformerDiffPruning(
+            patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
+            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True, **kwargs)
+    state_dict = torch.hub.load_state_dict_from_url(
+        url="https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
+        map_location="cpu", check_hash=True)
+    if 'model' in state_dict:
+        # For deit models
+        state_dict = state_dict['model']
+    out_dict = {}
+    for k, v in state_dict.items():
+        if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
+            # For old models that I trained prior to conv based patchification
+            O, I, H, W = model.patch_embed.proj.weight.shape
+            v = v.reshape(O, -1, H, W)
+        elif k == 'pos_embed' and v.shape != model.pos_embed.shape:
+            # To resize pos embedding when using model at different size from pretrained weights
+            v = resize_pos_embed(v, model.pos_embed)
+        out_dict[k] = v
+
+    model.default_cfg = _cfg()
+    missing_keys, unexpected_keys = model.load_state_dict(out_dict, strict=False)
+    print('# missing keys=', missing_keys)
+    print('# unexpected keys=', unexpected_keys)
+    print('sucessfully loaded from pre-trained weights: '
+          'https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth')
+
+    return model
+
+@register_model
 def default_dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
     model = DefaultVisionTransformerDiffPruning(
             patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
@@ -668,6 +699,55 @@ def default_dynamic_vit_small_patch16_224_student(pruning_locs, keep_ratios, **k
 
 
 @register_model
+def default_dynamic_vit_base_patch16_224_student(pruning_locs, keep_ratios, **kwargs):
+    model = DefaultVisionTransformerDiffPruning(
+            patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+            pruning_loc=pruning_locs, token_ratio=keep_ratios, distill=True, **kwargs)
+    state_dict = torch.hub.load_state_dict_from_url(
+        url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+        map_location="cpu", check_hash=True)
+    if 'model' in state_dict:
+        # For deit models
+        state_dict = state_dict['model']
+    out_dict = {}
+    for k, v in state_dict.items():
+        if 'patch_embed.proj.weight' in k and len(v.shape) < 4:
+            # For old models that I trained prior to conv based patchification
+            O, I, H, W = model.patch_embed.proj.weight.shape
+            v = v.reshape(O, -1, H, W)
+        elif k == 'pos_embed' and v.shape != model.pos_embed.shape:
+            # To resize pos embedding when using model at different size from pretrained weights
+            v = resize_pos_embed(v, model.pos_embed)
+        out_dict[k] = v
+
+    model.default_cfg = _cfg()
+    missing_keys, unexpected_keys = model.load_state_dict(out_dict, strict=False)
+    print('# missing keys=', missing_keys)
+    print('# unexpected keys=', unexpected_keys)
+    print('sucessfully loaded from pre-trained weights: '
+          'https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth')
+
+    return model
+
+
+@register_model
+def default_dynamic_vit_tiny_patch16_224_teacher():
+    model = DefaultVisionTransformerTeacher(
+                patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True
+            )
+    model.default_cfg = _cfg()
+    state_dict = torch.hub.load_state_dict_from_url(
+        url="https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
+        map_location="cpu", check_hash=True)
+    if 'model' in state_dict:
+        # For deit models
+        state_dict = state_dict['model']
+
+    model.load_state_dict(state_dict)
+
+    return model
+
+@register_model
 def default_dynamic_vit_small_patch16_224_teacher():
     model = DefaultVisionTransformerTeacher(
                 patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True
@@ -675,6 +755,23 @@ def default_dynamic_vit_small_patch16_224_teacher():
     model.default_cfg = _cfg()
     state_dict = torch.hub.load_state_dict_from_url(
         url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
+        map_location="cpu", check_hash=True)
+    if 'model' in state_dict:
+        # For deit models
+        state_dict = state_dict['model']
+
+    model.load_state_dict(state_dict)
+
+    return model
+
+@register_model
+def default_dynamic_vit_base_patch16_224_teacher():
+    model = DefaultVisionTransformerTeacher(
+                patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+            )
+    model.default_cfg = _cfg()
+    state_dict = torch.hub.load_state_dict_from_url(
+        url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
         map_location="cpu", check_hash=True)
     if 'model' in state_dict:
         # For deit models

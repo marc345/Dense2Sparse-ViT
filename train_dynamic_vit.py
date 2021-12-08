@@ -29,7 +29,8 @@ import wandb
 import utils
 import attention_segmentation
 
-from vit_models import default_dynamic_vit_small_patch16_224_student
+from vit_models import default_dynamic_vit_tiny_patch16_224_student, default_dynamic_vit_small_patch16_224_student, \
+    default_dynamic_vit_base_patch16_224_student
 
 seed = 42
 torch.manual_seed(seed)

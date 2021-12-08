@@ -120,6 +120,7 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
 def parse_args():
     parser = argparse.ArgumentParser(description='Transformers')
 
+    parser.add_argument('--arch', default='deit_small', type=str, help='Name of model to train')
     parser.add_argument('--is-sbatch', action='store_true', default=False,
                         help='Job is started via SLURM, used to add tensorboard tracking')
     parser.add_argument('--wandb', action='store_true', default=False,

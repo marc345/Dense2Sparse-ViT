@@ -675,7 +675,13 @@ if __name__ == '__main__':
     if args.is_sbatch:
         args.img_save_path = '/itet-stor/segerm/net_scratch/polybox/Dense2Sparse-ViT/'
         args.job_id = os.environ["SLURM_JOBID"]
-        args.patch_selection_method = f'{"topk" if args.topk_selection else "gumbel"}_predictor'
+        args.patch_selection_method = ""  #f'{"topk" if args.topk_selection else "gumbel"}'
+        if args.arch == "deit_tiny":
+            args.patch_selection_method += "DeiT-Ti"
+        elif args.arch == "deit_small":
+            args.patch_selection_method += "DeiT-S"
+        elif args.arch == "deit_base":
+            args.patch_selection_method += "DeiT-B"
         if args.topk_selection:
             if args.random_drop:
                 args.patch_selection_method += '_random_drop/'
@@ -773,14 +779,45 @@ if __name__ == '__main__':
         print('\n')
 
         # get the model specified as argument
-        student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
-                                                        topk_selection=args.topk_selection, early_exit=args.early_exit,
-                                                        mean_heads=args.mean_heads, random_drop=args.random_drop,
-                                                        small_predictor=args.small_predictor,
-                                                        predictor_vit=args.predictor_vit,
-                                                        predictor_kl_div_loss=args.use_kl_div_loss or args.use_mse_loss,
-                                                        predictor_bn=args.predictor_bn,
-                                                        patch_score_threshold=args.patch_score_threshold)
+        if args.arch == "deit_tiny":
+            student = dynamic_vit_tiny_patch16_224_student(args.pruning_locs, args.keep_ratios,
+                                                           topk_selection=args.topk_selection,
+                                                           early_exit=args.early_exit,
+                                                           mean_heads=args.mean_heads, random_drop=args.random_drop,
+                                                           small_predictor=args.small_predictor,
+                                                           predictor_loss_type=args.mask_loss_type,
+                                                           predictor_bn=args.predictor_bn,
+                                                           patch_score_threshold=args.patch_score_threshold)
+            teacher = utils.get_model({"model_name": "dynamic_vit_tiny_teacher", "patch_size": 16}, pretrained=True)
+        elif args.arch == "deit_base":
+            student = dynamic_vit_base_patch16_224_student(args.pruning_locs, args.keep_ratios,
+                                                           topk_selection=args.topk_selection,
+                                                           early_exit=args.early_exit,
+                                                           mean_heads=args.mean_heads, random_drop=args.random_drop,
+                                                           small_predictor=args.small_predictor,
+                                                           predictor_loss_type=args.mask_loss_type,
+                                                           predictor_bn=args.predictor_bn,
+                                                           patch_score_threshold=args.patch_score_threshold)
+            teacher = utils.get_model({"model_name": "dynamic_vit_base_teacher", "patch_size": 16}, pretrained=True)
+        else: # default: args.arch == "deit_small":
+            student = dynamic_vit_small_patch16_224_student(args.pruning_locs, args.keep_ratios,
+                                                            topk_selection=args.topk_selection,
+                                                            early_exit=args.early_exit,
+                                                            mean_heads=args.mean_heads, random_drop=args.random_drop,
+                                                            small_predictor=args.small_predictor,
+                                                            predictor_loss_type=args.mask_loss_type,
+                                                            predictor_bn=args.predictor_bn,
+                                                            patch_score_threshold=args.patch_score_threshold)
+            teacher = utils.get_model({"model_name": "dynamic_vit_small_teacher", "patch_size": 16}, pretrained=True)
+
+        student = student.to(args.device)
+        teacher = teacher.to(args.device)
+
+        # dino_model = utils.get_model({'model_name': 'dino_small_dist', 'patch_size': 16}, pretrained=True)
+        # dino_model.eval()
+        # for param in dino_model.parameters():
+        #    param.requires_grad = False
+
         parameter_group = utils.get_param_groups(student, args)
 
         if args.is_sbatch and args.wandb:
