@@ -68,62 +68,6 @@ def dataset_with_indices_and_attn_weights(cls):
         '__getitem__': __getitem__,
     })
 
-def get_mask_from_pred_logits(logits, keep_ratio):
-    """
-        input: logits, (B, N) the predicted scores for each token in the token sequences in the current batch
-        keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
-        mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
-                    across the attention heads
-    """
-
-    sort_idxs = torch.argsort(logits, dim=-1, descending=True)
-
-    num_kept_tokens = int(logits.shape[-1]*keep_ratio)
-    kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=logits.device)
-    dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=logits.device)
-    mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
-
-    mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
-
-    return mask
-
-
-def get_mask_from_cls_attns(cls_attns, keep_ratio, mean_heads=False):
-    """
-        input: cls_attns, (B, L, H, N+1) the CLS attention weights from the unpruned teacher network from all the
-               encoder layers and different attention heads
-        keep_ratio: the amount of tokens to keep in percent, e.g. [0,1]
-        mean_heads: whether to aggregate the attention weights from the different heads by averaging or taking the max
-                    across the attention heads
-    """
-    # mean across all encoder layers
-    cls_attns = torch.mean(cls_attns, dim=1)
-    if mean_heads:
-        # aggregate across heads via mean
-        cls_attns = torch.mean(cls_attns, dim=1)
-    else:
-        # aggregate across heads via max
-        cls_attns, _ = torch.max(cls_attns, dim=1)
-    # exclude CLS weight
-    cls_attns = cls_attns[:, 1:]
-
-    # sort in order to take K highest according to keeping ratio
-    sort_idxs = torch.argsort(cls_attns, dim=-1, descending=True)
-
-    # compute nubmer of kept tokens
-    num_kept_tokens = int(cls_attns.shape[-1]*keep_ratio)
-    # 1s in mask --> kept tokens
-    kept_mask = torch.ones_like(sort_idxs[:, :num_kept_tokens], device=cls_attns.device)
-    # 0s in mask --> dropped tokens
-    dropped_mask = torch.zeros_like(sort_idxs[:, num_kept_tokens:], device=cls_attns.device)
-    mask = torch.cat((kept_mask, dropped_mask), dim=-1).float()
-
-    # bring back tokens in original order (currently still sorted descending)
-    mask.scatter_(index=sort_idxs, src=mask.clone(), dim=-1)
-
-    return mask
-
-
 #######################################################################################################################
 
 def evaluate_timing(args, model, teacher_model, val_data_loader):
