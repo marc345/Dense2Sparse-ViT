@@ -51,22 +51,6 @@ torch.backends.cudnn.benchmark = True
 
 #######################################################################################################################
 
-
-# simple fix for dataparallel that allows access to class attributes
-class MyDataParallel(torch.nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
-
-    def __setattr__(self, name, value):
-        try:
-            return super().__setattr__(name, value)
-        except AttributeError:
-            return setattr(self.module, name, value)
-
-
 def dataset_with_indices_and_attn_weights(cls):
     """
     Modifies the given Dataset class to return a tuple data, target, index
