@@ -52,26 +52,6 @@ torch.backends.cudnn.benchmark = True
 #######################################################################################################################
 
 
-#######################################################################################################################
-
-# Data augmentation and normalization for training
-# Just normalization for validation
-data_transforms = {
-    'train': transforms.Compose([
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ]),
-    'val': transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ]),
-}
-
-
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
     def __getattr__(self, name):
@@ -433,6 +413,9 @@ if __name__ == '__main__':
         opt_args = dict(lr=args.lr, weight_decay=args.weight_decay)
         optim = torch.optim.AdamW(parameter_group, **opt_args)
 
+        train_data_set, val_data_set = get_data_sets(args, data_dir)
+        data = {"train": train_data_set,
+                "val": val_data_set}
 
         # obtain training indices that will be used for validation
         num_train = len(data['train'])
