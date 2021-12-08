@@ -94,13 +94,16 @@ if __name__ == '__main__':
         else:
             args.patch_selection_method += '/'
 
-        # pruning and keep ratio parameters
-        args.job_name = args.patch_selection_method + \
-                        f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
-                        f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}' \
-                        # f'{"_".join([str(ratio) for ratio in args.keep_ratios])}_' \
-                        # f'loss_weights_clf_{args.cls_weight}_dist_{args.dist_weight}_' \
-                        # f'{"ratio_"+str(args.ratio_weight)+"_" if args.use_ratio_loss and not args.topk_selection else ""}' \
+        if args.patch_score_threshold is not None:
+            # pruning and keep ratio parameters
+            args.job_name = args.patch_selection_method + \
+                            f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
+                            f'K_highest{int((1-args.patch_score_threshold)*100)}%'
+        else:
+            # pruning and keep ratio parameters
+            args.job_name = args.patch_selection_method + \
+                            f'L{"-".join([str(loc) for loc in args.pruning_locs])}_' \
+                            f'K{"-".join([str(ratio) for ratio in args.keep_ratios])}'
 
         # inital sigma if top-k selection is used, sigma is decayed linearly over training
         # if args.topk_selection:
