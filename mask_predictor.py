@@ -301,16 +301,16 @@ if __name__ == '__main__':
 
             # evaluate_timing(args, student, teacher, data_loaders['val'])
             # continue
-            train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'],
-                                            mask_loss_fn, dynamic_vit_loss, optim)
-            val_metrics, avg_cls_attns = evaluate(args, student, teacher, data_loaders['val'], mask_loss_fn)
-            visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels, avg_cls_attns)
+            train_metrics = train_one_epoch(args, student, teacher, data_loaders['train'], optim, mixup_fn)
+            # train_metrics = {}
+            val_metrics = evaluate_performance(args, student, teacher, data_loaders['val'])
+            #visualize(student, teacher, epoch, mask_test_imgs, mask_test_labels, avg_cls_attns)
 
             epoch_metrics = dict(train_metrics, **val_metrics)
             if epoch_metrics['val_acc'] > best_acc:
                 best_acc = epoch_metrics['val_acc']
-            if epoch_metrics['val_mask_acc'] > best_acc:
-                best_mask_acc = epoch_metrics['val_mask_acc']
+                # Path("saved_models").mkdir(parents=True, exist_ok=True)
+                # torch.save(student.state_dict(), f"saved_models/{args.job_name.split('/')[-1]}_best_params.pt")
 
             if args.is_sbatch and args.wandb:
                 # only once per epoch (training and test) otherwise step increases by 2 (1 for train, 1 for test epoch)
