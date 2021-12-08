@@ -118,8 +118,10 @@ if __name__ == '__main__':
                          f'{args.job_name}'
 
         wandb.init(
+            # project="DyViT-vs-ours",
             project="Dense2Sparse-ViT",
             name=wandb_job_name,
+            dir="/scratch_net/biwidl215/segerm/wandb/"
             # notes="tweak baseline",
             # tags=["baseline", "paper1"],
             # config=config,
