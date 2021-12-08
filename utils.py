@@ -131,6 +131,36 @@ def adjust_learning_rate(param_groups, args, step, warming_up_step=2, warmup_pre
             param_group['lr'] = early_exit_head_lr
         else:
             param_group['lr'] = backbone_lr  # init_lr * 0.01 # cos_lr * base_multi
+def get_current_keep_ratio(epoch):
+    """ Returns keep ratio for curriculum learning based on current epoch
+        :param epoch: the current epoch of the training period
+        :return: keep_ratio
+    """
+    min_ratio = 0.3
+    if epoch <= 90:
+        keep_ratio = 1 - (1 - min_ratio) / 90 * epoch
+    else:
+        keep_ratio = min_ratio
+
+    print(f'EPOCH {epoch} current keep ratio: {keep_ratio:.2f}')
+
+    return keep_ratio
+
+def get_current_patch_score_threshold(epoch):
+    """ Returns keep ratio for curriculum learning based on current epoch
+        :param epoch: the current epoch of the training period
+        :return: keep_ratio
+    """
+    base_threshold = 0.1
+    max_threshold = 0.5
+    if epoch <= 90:
+        patch_score_threshold = (max_threshold-base_threshold)/90 * epoch + base_threshold
+    else:
+        patch_score_threshold = max_threshold
+
+    print(f'EPOCH {epoch} current patch score threshold: {patch_score_threshold:.2f}')
+
+    return patch_score_threshold
 
 
 def parse_args():
