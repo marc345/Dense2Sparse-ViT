@@ -758,7 +758,6 @@ class VisionTransformerDiffPruning(nn.Module):
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
                  pruning_loc=None, token_ratio=None, distill=False, attn_selection=False, attn_selection_threshold=0.0,
                  topk_selection=False, early_exit=False, mean_heads=False, random_drop=False, small_predictor=False,
-                 predictor_vit=False, predictor_kl_div_loss=False, predictor_bn=False, patch_score_threshold=None):
         """
         Args:
             img_size (int, tuple): input image size

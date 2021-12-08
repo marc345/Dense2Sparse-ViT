@@ -712,10 +712,8 @@ if __name__ == '__main__':
             args.job_name += f'_S{args.initial_sigma}'
 
         # either small MLP, large MLP or 1-layer ViT are used as predictor networks
-        if not args.predictor_vit and args.small_predictor:
+        if args.small_predictor:
             args.job_name += '_sMP'
-        elif not args.predictor_vit:
-            args.job_name += '_lMP'
         else:
             args.job_name += '_VP'
 
