@@ -458,6 +458,14 @@ if __name__ == '__main__':
                 for x in ['train', 'val']}
 
         mixup_fn = None
+        mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+        if mixup_active:
+            mixup_fn = Mixup(
+                mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+                prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+                label_smoothing=args.smoothing, num_classes=args.nb_classes)
+        else:
+            print('Attention: mixup/cutmix are not used')
 
         #print(indices[split - 64:split])
         mask_test_indices = [17370, 48766, 5665, 2989, 28735, 45554, 12487, 2814, 7516, 18679, 17954, 961, 30928, 1791,
