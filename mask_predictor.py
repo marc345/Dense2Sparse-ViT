@@ -51,23 +51,6 @@ torch.backends.cudnn.benchmark = True
 
 #######################################################################################################################
 
-def dataset_with_indices_and_attn_weights(cls):
-    """
-    Modifies the given Dataset class to return a tuple data, target, index
-    instead of just data, target.
-    """
-
-    def __getitem__(self, index):
-        data, target = cls.__getitem__(self, index)
-        attn_weights = torch.load(
-                f'/scratch_net/biwidl215/segerm/TeacherAttentionWeights/DeiT-S16/CLS/{index}.pt',
-                map_location=torch.device('cpu'))()
-        return index, attn_weights, data, target
-
-    return type(cls.__name__, (cls,), {
-        '__getitem__': __getitem__,
-    })
-
 #######################################################################################################################
 
 def evaluate_timing(args, model, teacher_model, val_data_loader):
